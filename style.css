@@ -166,3 +166,38 @@ kbd { font-size: 10px; opacity: 0.6; border: 1px solid var(--line); padding: 0 3
   #selection { width: 58vw; font-size: 11px; }
   #log { width: 92vw; bottom: 110px; }
 }
+
+/* ---------- v2 additions ---------- */
+#modal { z-index: 20; }
+.tbtns { display: flex; gap: 10px; justify-content: center; pointer-events: auto; }
+.tbtns button { padding: 8px 16px; }
+#topbar .res span { white-space: nowrap; }
+#topbar .res b.bad { color: var(--bad); }
+#cmdbar:not(:empty) { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; }
+.cmdrow { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin: 3px 0; }
+.cmdrow .dim { font-size: 11px; margin-right: 4px; }
+.cmdrow button { padding: 2px 8px; font-size: 11px; }
+.subs { display: flex; gap: 3px; flex-wrap: wrap; margin: 3px 0; }
+.sub { font-size: 10px; padding: 1px 5px; border: 1px solid var(--line); color: #b9c8e6; }
+.sub.low { color: var(--warn); border-color: var(--warn); }
+.sub.off { color: var(--bad); border-color: var(--bad); text-decoration: line-through; }
+#abilities { position: absolute; left: 50%; bottom: 46px; transform: translateX(-50%); display: flex; gap: 8px; pointer-events: auto; }
+#abilities button { min-width: 150px; text-align: left; display: flex; flex-direction: column; padding: 5px 10px; }
+#abilities button b { font-weight: 400; font-size: 12px; }
+#abilities button small { font-size: 10px; color: var(--dim); }
+#abilities button.ready { border-color: var(--accent); }
+#abilities button.cd { opacity: 0.55; }
+.outlook { font-size: 12px; margin-top: 2px; }
+.outlook.ok b { color: var(--good); }
+.outlook.no b { color: var(--bad); }
+.outlook.mid b { color: var(--warn); }
+.counter { margin-top: 6px; padding: 5px 8px; border: 1px dashed var(--warn); color: #f3e2b8; }
+.counter button { float: none; margin-left: 6px; }
+.builds .b.done { border-color: var(--good); opacity: 0.75; }
+.panel select, .panel input[type=range] { background: #0f1730; color: var(--ink); border: 1px solid var(--line); }
+#galaxy .gpanel h4 { margin: 8px 0 4px; font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.15em; font-weight: 400; }
+#galaxy .gpanel .btnrow button.on { border-color: var(--good); color: var(--good); }
+@media (max-width: 700px) {
+  #abilities { bottom: auto; top: 140px; left: 8px; transform: none; flex-direction: column; }
+  #abilities button { min-width: 0; }
+}

@@ -1,6 +1,6 @@
 // Local real-time simulation shared by close, fleet and system camera scales.
 import { v3, clamp, damp, angleWrap, TAU } from './math.js';
-import { makeFighter } from './entities.js';
+import { makeFighter, subOff, rankOf } from './entities.js';
 
 export class World {
   constructor(game, def) {
@@ -18,6 +18,8 @@ export class World {
     this.t = 0;
     this.script = null;
     this.hazards = def.hazards || [];
+    this.storms = def.storms || [];
+    this.lastCombat = -99;
   }
 
   add(e) {
@@ -65,6 +67,13 @@ export class World {
   update(dt) {
     this.t += dt;
     this._cmb = this.combatants();
+    for (const e of this._cmb) {
+      e.inStorm = this.storms.some((s) => v3.dist(e.pos, s.pos) < s.r);
+      if (e.hotT > 0) e.hotT -= dt;
+      if (e.overT > 0) e.overT -= dt;
+      if (e.braceT > 0) e.braceT -= dt;
+      if (e.jamT > 0) e.jamT -= dt;
+    }
     // Aura effects (keystones, electronic warfare, networks) computed once per frame.
     this.computeAuras();
     for (const e of this.entities) {
@@ -102,7 +111,7 @@ export class World {
       e.auraRate = 1;
     }
     for (const k of this._cmb) {
-      if (k.keystone && !k.dead) {
+      if (k.keystone && !k.dead && !subOff(k, 'command')) {
         // An Array flagship's electronic warfare suppresses a synthetic archive's network.
         const jammed = k.keystone === 'archive' && this._cmb.some((p) => p.team === 'player' && p.style === 'array' && p.role === 'flagship' && v3.dist(p.pos, k.pos) < 300);
         k.jammed = jammed;
@@ -118,9 +127,20 @@ export class World {
         for (const o of this._cmb) if (this.hostile(k, o) && v3.dist(o.pos, k.pos) < 280) o.auraRate = 0.8;
       }
     }
-    // Array network: damage bonus per nearby Array ship.
+    // Array network: damage bonus per nearby Array ship — but only with a live command link.
+    const link = this._cmb.find((p) => p.team === 'player' && p.style === 'array' && p.role === 'flagship' && !p.ally && !subOff(p, 'command'));
     for (const e of this._cmb) {
-      if (e.style !== 'array' || e.team !== 'player' || e.kind !== 'ship') continue;
+      if (e.team === 'player') {
+        if (e.overT > 0) e.auraRate *= 1.45;
+        if (e.braceT > 0) e.auraDmgTaken *= 0.7;
+      }
+      if (e.style !== 'array' || e.team !== 'player' || e.kind !== 'ship' || e.isFighter) continue;
+      e.linked = !!link && v3.dist(link.pos, e.pos) < 650;
+      if (!e.linked) {
+        e.network = 0;
+        e.auraRate *= 0.9;
+        continue;
+      }
       let n = 0;
       for (const o of this._cmb) if (o !== e && o.style === 'array' && o.team === 'player' && o.kind === 'ship' && !o.isFighter && v3.dist(o.pos, e.pos) < 260) n++;
       e.auraDmg *= 1 + Math.min(4, n) * 0.08;
@@ -144,8 +164,9 @@ export class World {
       return;
     }
     e.slowT -= dt;
-    e.engineDamaged = !e.isFighter && e.hull < e.maxHull * 0.35;
-    const maxSpeed = e.baseSpeed * (e.engineDamaged ? 0.5 : 1) * (e.slowT > 0 ? 0.55 : 1) * (e.speedMul || 1);
+    const adrift = subOff(e, 'engines');
+    e.engineDamaged = !e.isFighter && (adrift || e.hull < e.maxHull * 0.35);
+    const maxSpeed = e.baseSpeed * (adrift ? 0.08 : e.engineDamaged ? 0.5 : 1) * (e.slowT > 0 ? 0.55 : 1) * (e.speedMul || 1);
     if (e.isFighter) return this.updateFighter(e, dt, maxSpeed);
     if (e.team !== 'player' || e.ally) this.ai(e, dt);
     else this.playerIdle(e);
@@ -214,6 +235,32 @@ export class World {
             if (o.done) o.done(e);
           }
         }
+      } else if (o.type === 'hold') {
+        goal = o.pos;
+      } else if (o.type === 'board') {
+        const t = this.get(o.id);
+        if (!t || t.team === e.team || !this.boardable(t)) {
+          e.order = null;
+          e.boarding = null;
+          if (t) t.boardHold = false;
+        } else {
+          t.boardHold = true;
+          const d = v3.dist(e.pos, t.pos);
+          if (d > t.radius + 45) {
+            goal = t.pos;
+            e.boarding = null;
+          } else {
+            goal = v3.add(t.pos, [Math.sin(e.id) * t.radius * 0.6, 4, Math.cos(e.id) * t.radius * 0.6]);
+            e.boarding = t.id;
+            t.boardP = (t.boardP || 0) + dt * (e.role === 'boarder' ? 1 : 0.45) / (t.role === 'keystone' ? 14 : 8);
+            if (Math.random() < dt * 8) this.puff(v3.lerp(e.pos, t.pos, Math.random()), 2, e.style === 'bloom' ? [0.5, 1, 0.6] : [1, 0.8, 0.4]);
+            if (t.boardP >= 1) {
+              e.order = null;
+              e.boarding = null;
+              this.capture(t, e);
+            }
+          }
+        }
       } else if (o.type === 'flee') {
         goal = o.pos;
         if (v3.distXZ(e.pos, o.pos) < 60) {
@@ -230,7 +277,7 @@ export class World {
     if (!e.order) {
       if (!e.anchor) e.anchor = [...e.pos];
       // Defensive stance: engage threats that come close, without chasing far.
-      const h = this.nearestHostile(e, this.maxRange(e) + 120, (o) => !o.broken);
+      const h = this.nearestHostile(e, this.maxRange(e) + 120, (o) => !o.broken && !o.boardHold);
       if (h) e.order = { type: 'attack', id: h.id, leash: 420, auto: true };
     }
   }
@@ -242,8 +289,9 @@ export class World {
     e.aiT = 0.5 + Math.random() * 0.4;
     const homeP = e.home || e.pos;
     if (e.team === 'raider') {
-      const pref = this.nearestHostile(e, 2600, (o) => o.convoy);
-      const t = pref || this.nearestHostile(e, 2600);
+      const range = e.garrison ? 900 : 2600;
+      const pref = this.nearestHostile(e, range, (o) => o.convoy);
+      const t = pref || this.nearestHostile(e, range);
       if (t) e.order = { type: 'attack', id: t.id, auto: true };
       else if (!e.order) e.order = { type: 'patrol', c: homeP, r: 120, auto: true };
       return;
@@ -367,10 +415,24 @@ export class World {
     if (e.warpIn > 0 || e.jumping) return;
     // Regeneration
     const sinceHit = this.t - e.lastHit;
-    if (sinceHit > 3 && e.shield < e.maxShield) e.shield = Math.min(e.maxShield, e.shield + e.shieldRegen * e.auraShield * dt);
+    const shieldsDown = subOff(e, 'shields');
+    if (shieldsDown) e.shield = 0;
+    else if (sinceHit > 3 && e.shield < e.maxShield && !e.inStorm) e.shield = Math.min(e.maxShield, e.shield + e.shieldRegen * e.auraShield * dt);
     if (e.hull < e.maxHull) {
-      const rate = sinceHit > 6 ? Math.max(e.regenHull || 0, e.regenHullIdle || 0) : e.regenHull || 0;
+      let rate = sinceHit > 6 ? Math.max(e.regenHull || 0, e.regenHullIdle || 0) : e.regenHull || 0;
+      if (e.hotT > 0) rate += 0.05;
+      // The Bloom's weakness: living regeneration consumes biological reserves.
+      if (e.style === 'bloom' && e.team === 'player' && rate > 0) {
+        if (this.game.reserves <= 0 && !(e.hotT > 0)) rate = 0;
+        else this.game.reserves = Math.max(0, this.game.reserves - rate * e.maxHull * dt * 0.004);
+      }
       e.hull = Math.min(e.maxHull, e.hull + rate * e.maxHull * dt);
+    }
+    if (e.subs && sinceHit > 8) {
+      for (const k in e.subs) {
+        const sb = e.subs[k];
+        if (sb.hp < sb.max) sb.hp = Math.min(sb.max, sb.hp + sb.max * (e.style === 'bloom' ? 0.03 : 0.015) * dt);
+      }
     }
     if (e.dot.length) {
       for (const d of e.dot) {
@@ -427,7 +489,7 @@ export class World {
         this.puff(f.pos, 3, e.visual.glowCol || [1, 0.8, 0.5]);
       }
     }
-    if (!e.weapons.length || e.broken) return;
+    if (!e.weapons.length || e.broken || subOff(e, 'weapons') || e.jamT > 0) return;
     if (e.team === 'civ' && !(this.civ && this.civ.state.hostile) && !this.nearestHostile(e, 400)) return;
     for (const w of e.weapons) {
       w.t -= dt * e.auraRate;
@@ -443,16 +505,17 @@ export class World {
   }
 
   pickTarget(e, w) {
-    const inRange = (t) => t && !t.dead && this.hostile(e, t) && !t.invulnerable && v3.dist(e.pos, t.pos) - t.radius * 0.6 < w.range;
+    const range = w.range * (e.inStorm ? 0.7 : 1);
+    const inRange = (t) => t && !t.dead && this.hostile(e, t) && !t.invulnerable && v3.dist(e.pos, t.pos) - t.radius * 0.6 < range;
     const ordered = e.order && e.order.type === 'attack' ? this.get(e.order.id) : null;
-    if (ordered && inRange(ordered)) return ordered;
+    if (ordered && inRange(ordered) && !(ordered.boardHold && e.order.auto)) return ordered;
     const focus = e.focus ? this.get(e.focus) : null;
-    if (focus && inRange(focus) && !focus.broken) return focus;
+    if (focus && inRange(focus) && !focus.broken && !focus.boardHold) return focus;
     const tags = w.tags || [];
     let best = null, bs = -1e9;
     for (const o of this._cmb) {
       if (!inRange(o)) continue;
-      if (o.broken && !(ordered && ordered.id === o.id)) continue;
+      if ((o.broken || o.boardHold) && !(ordered && ordered.id === o.id && !e.order.auto)) continue;
       const d = v3.dist(e.pos, o.pos);
       let s = -d;
       if (tags.includes('flak') && o.isFighter) s += 300;
@@ -474,6 +537,8 @@ export class World {
 
   fire(e, w, t) {
     const from = this.hardpoint(e);
+    if (e.team === 'player' || t.team === 'player') this.lastCombat = this.t;
+    if (this.game.onEvent) this.game.onEvent('fire', { e, w });
     if (w.kind === 'beam') {
       const to = this.hardpoint(t);
       this.beams.push({ a: from, b: to, aId: e.id, bId: t.id, life: 0.22, max: 0.22, width: w.width || 1, col: w.color });
@@ -527,6 +592,16 @@ export class World {
     }
     if (dmg > 0) {
       if (!silent) dmg = Math.max(dmg - t.armor, dmg * 0.3);
+      if (t.subs && !silent) {
+        // Focused fire strips a chosen subsystem; stray hits occasionally damage one at random.
+        const focused = src && src.subFocus && src.focus === t.id && t.subs[src.subFocus] ? src.subFocus : null;
+        const key = focused || (Math.random() < 0.18 ? Object.keys(t.subs)[Math.floor(Math.random() * Object.keys(t.subs).length)] : null);
+        if (key && t.subs[key].hp > 0) {
+          t.subs[key].hp -= dmg * (focused ? 0.75 * (this.game.research && this.game.research.subsys ? 1.4 : 1) : 0.35);
+          if (t.subs[key].hp <= 0) this.onSubDisabled(t, key, src);
+          if (focused) dmg *= 0.6;
+        }
+      }
       t.hull -= dmg;
       if (!silent) t.fx.hit = 1;
       if (t.kind === 'station' && t.team === 'civ' && !t.broken && t.hull < t.maxHull * 0.25) {
@@ -538,6 +613,35 @@ export class World {
       }
       if (t.hull <= 0) this.kill(t, src);
     }
+  }
+
+  boardable(t) {
+    return t.kind === 'ship' && !t.isFighter && !t.dead && (subOff(t, 'engines') || t.hull < t.maxHull * 0.3);
+  }
+
+  capture(t, by) {
+    t.team = by.team;
+    t.selectable = true;
+    t.captured = true;
+    t.ally = false;
+    t.order = null;
+    t.waveTarget = null;
+    t.boardP = 0;
+    t.boardHold = false;
+    t.dot = [];
+    t.tint = [0.8, 1.0, 0.85];
+    t.name = `Captured ${t.cls}`;
+    t.slots = t.slots || 1;
+    if (t.subs && t.subs.engines) t.subs.engines.hp = t.subs.engines.max * 0.3;
+    this.particles.push({ pos: [...t.pos], vel: [0, 0, 0], life: 1, max: 1, size: t.radius, grow: t.radius * 2, col: [0.5, 1, 0.6], mode: 2 });
+    if (this.script && this.script.onCapture) this.script.onCapture(t, by);
+    if (this.game.onCapture) this.game.onCapture(t, by, this);
+  }
+
+  onSubDisabled(t, key, src) {
+    this.particles.push({ pos: this.hardpoint(t), vel: [0, 0, 0], life: 0.6, max: 0.6, size: t.radius * 0.5, grow: t.radius, col: [1, 0.6, 0.3], mode: 0 });
+    if (key === 'shields') t.shield = 0;
+    if (this.game.onEvent) this.game.onEvent('subsystem', { t, key, src });
   }
 
   onShieldBreak(t) {
@@ -558,6 +662,17 @@ export class World {
     if (e.dead) return;
     e.dead = true;
     e.hull = 0;
+    if (src && src.team === 'player' && !src.dead && src.kind === 'ship' && e.kind !== 'wreck') {
+      const gain = e.isFighter ? 0.3 : e.radius > 18 || e.kind === 'station' ? 4 : 1.5;
+      const before = src.rank || 0;
+      src.xp = (src.xp || 0) + gain;
+      src.rank = rankOf(src.xp);
+      if (src.style === 'ascendancy' && src.rank > before) {
+        src.dmgMul = 1 + 0.08 * src.rank;
+        if (this.game.log) this.game.log(`${src.name} crew promoted to rank ${src.rank} ${'★'.repeat(src.rank)}`, 'good');
+      }
+      if (this.game.faction === 'bloom' && !e.isFighter) this.game.reserves = Math.min(100, (this.game.reserves || 0) + 4);
+    }
     const big = e.radius > 18 || e.kind === 'station';
     const c = e.visual?.glowCol || [1, 0.7, 0.4];
     if (!quiet) this.explode(e.pos, e.radius, c, big);

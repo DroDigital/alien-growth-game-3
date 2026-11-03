@@ -1,7 +1,9 @@
 // DOM user interface: HUD, panels, dossier/negotiation, expedition planner, shipyard,
 // adaptation bay, galaxy map and touch radial menu.
-import { FACTIONS, TRAITS, TIERS, OBJECTIVES, SHIP_COST, BUILD_TIME } from './data.js';
-import { PROPOSALS, evaluate, propose, hail, gift, threaten, declareWar, beginIntegration, startMission, threatEstimate, accessPoint, integrationRisks, integrationSpeed, fleetNearCapital, shipsAt } from './encounter.js';
+import { FACTIONS, TRAITS, TIERS, OBJECTIVES, SHIP_COST, BUILD_TIME, ABILITIES, RESEARCH, SYSTEM_ROLES, WEAKNESS, SUBSYSTEMS } from './data.js';
+import { PROPOSALS, evaluate, propose, outlook, acceptCounter, hail, gift, threaten, declareWar, beginIntegration, startMission, threatEstimate, accessPoint, integrationRisks, integrationSpeed, fleetNearCapital, shipsAt } from './encounter.js';
+import { abilityState, doResearch, setRole, sysState, sysLabel, controlled } from './events.js';
+import { hasSave, saveInfo, clearSave } from './save.js';
 import { col, clamp } from './math.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -33,13 +35,30 @@ export class UI {
       <div class="cards">${Object.values(FACTIONS)
         .map((f) => `<button class="card" data-f="${f.id}" style="--fc:${col.css(f.color)}"><h2>${f.name}</h2><em>${f.kind}</em><p>${f.tagline}</p><small>${f.blurb}</small><span class="go">Begin as ${f.name.replace('The ', '')}</span></button>`)
         .join('')}</div>
+      <div class="tbtns"><button id="bContinue" class="primary" style="display:none"></button><button id="bTSettings">Settings</button></div>
       <div class="hint">Mouse: left select · right order · right-drag orbit · wheel zoom · Space tactical pause. Touch: tap, drag, pinch, long-press for commands.</div>`;
     this.root.appendChild(t);
     t.querySelectorAll('.card').forEach((c) => {
       c.addEventListener('mouseenter', () => this.g.startTitle(c.dataset.f));
       c.addEventListener('focus', () => this.g.startTitle(c.dataset.f));
-      c.addEventListener('click', () => this.g.newGame(c.dataset.f));
+      c.addEventListener('click', () => {
+        if (hasSave() && !c.dataset.confirm) {
+          c.dataset.confirm = 1;
+          c.querySelector('.go').textContent = 'Start a new campaign? Click again — the old save is replaced';
+          return;
+        }
+        clearSave();
+        this.g.newGame(c.dataset.f);
+      });
     });
+    const info = saveInfo();
+    const cb = $('#bContinue', t);
+    if (info) {
+      cb.style.display = '';
+      cb.textContent = `Continue — ${FACTIONS[info.faction].name} · ${info.where || ''}`;
+      cb.onclick = () => this.g.continueGame();
+    }
+    $('#bTSettings', t).onclick = () => this.openSettings();
     this.title = t;
   }
 
@@ -49,7 +68,7 @@ export class UI {
     h.innerHTML = `
       <div id="topbar">
         <div class="fac"></div>
-        <div class="res"><span title="Materials">◈ <b id="mat">0</b></span><span title="Integration capacity">⟁ <b id="cap">1</b></span></div>
+        <div class="res"><span title="Materials — construction and repairs">◈ <b id="mat">0</b></span><span title="Energy — jumps and abilities">ϟ <b id="nrg">0</b></span><span title="Knowledge — research">✧ <b id="kno">0</b></span><span id="resv" title="Biological reserves — Bloom regeneration and growth">❦ <b id="rsv">0</b></span><span title="Integration capacity">⟁ <b id="cap">1</b></span></div>
         <div class="sys" id="sysname"></div>
         <div class="time">
           <button id="bPause" title="Tactical pause (Space)">❚❚</button>
@@ -60,7 +79,10 @@ export class UI {
           <button id="bYard" title="Shipyard (B)">Shipyard <kbd>B</kbd></button>
           <button id="bAdapt" title="Adaptation bay (R)">Adaptation <kbd>R</kbd></button>
           <button id="bDossier" title="Civilization dossier (C)">Dossier <kbd>C</kbd></button>
+          <button id="bRes" title="Research (Y)">Research <kbd>Y</kbd></button>
           <button id="bGal" title="Galaxy map (G)">Galaxy <kbd>G</kbd></button>
+          <button id="bSave" title="Save campaign">Save</button>
+          <button id="bSet" title="Settings">⚙</button>
           <button id="bHelp" title="Controls">?</button>
         </div>
       </div>
@@ -68,7 +90,8 @@ export class UI {
       <div id="progress"><span></span><i></i></div>
       <div id="objectives"></div>
       <div id="log"></div>
-      <div id="selection"></div>
+      <div id="selection"><div class="info"></div><div id="cmdbar"></div></div>
+      <div id="abilities"></div>
       <div id="scale"><b></b><span>F fleet · T track · Tab scale · Z/V elevation</span></div>
       <div id="touchbar"><button data-t="pause">❚❚</button><button data-t="fleet">Fleet</button><button data-t="all">All</button><button data-t="gal">Map</button></div>
       <div id="banner"><h3></h3><p></p></div>
@@ -77,6 +100,7 @@ export class UI {
       <div id="radial"></div>`;
     this.root.appendChild(h);
     this.hud = h;
+    this.root.appendChild($('#modal'));
     $('#bPause').onclick = () => this.g.togglePause();
     h.querySelectorAll('.time [data-s]').forEach((b) => (b.onclick = () => this.g.setSpeed(+b.dataset.s)));
     $('#bExp').onclick = () => this.openExpedition();
@@ -85,6 +109,9 @@ export class UI {
     $('#bDossier').onclick = () => this.openDossier();
     $('#bGal').onclick = () => this.toggleGalaxy();
     $('#bHelp').onclick = () => this.openHelp();
+    $('#bRes').onclick = () => this.openResearch();
+    $('#bSave').onclick = () => this.g.save(true);
+    $('#bSet').onclick = () => this.openSettings();
     $('#galaxy .gclose').onclick = () => this.toggleGalaxy();
     h.querySelectorAll('#touchbar button').forEach((b) => {
       b.onclick = () => {
@@ -105,6 +132,8 @@ export class UI {
     this.hud.style.display = 'block';
     const f = this.g.fac;
     $('.fac', this.hud).innerHTML = `<i style="background:${col.css(f.color)}"></i>${f.name}`;
+    $('#resv').style.display = this.g.faction === 'bloom' ? '' : 'none';
+    this.renderAbilities(true);
     this.onWorldChanged();
     this.renderTime();
   }
@@ -125,6 +154,10 @@ export class UI {
     if (g.state !== 'play') return;
     $('#mat').textContent = Math.floor(g.materials);
     $('#cap').textContent = `${g.integrationCap - g.integrationUsed}/${g.integrationCap}`;
+    $('#nrg').textContent = Math.floor(g.energy);
+    $('#kno').textContent = Math.floor(g.knowledge);
+    $('#rsv').textContent = Math.floor(g.reserves);
+    $('#rsv').className = g.reserves < 20 ? 'bad' : '';
     $('#sysname').textContent = g.world.name + (g.debug ? `  ·  ${g.fps.toFixed(0)} fps · ${g.R.stats.draws} draws · ${Math.round(g.R.stats.tris / 1000)}k tris` : '');
     $('#scale b').textContent = g.cam.scaleName();
     const pr = $('#progress');
@@ -142,6 +175,7 @@ export class UI {
     if (this.selT <= 0) {
       this.selT = 0.25;
       this.renderSelection();
+      this.renderAbilities();
       if (this.modalOpen && this.modalKind === 'dossier') this.refreshDossierLive();
       if (this.modalOpen && this.modalKind === 'yard') this.openShipyard(true);
     }
@@ -196,16 +230,24 @@ export class UI {
   }
 
   // ---------------- Selection panel ----------------
-  renderSelection() {
+  renderSelection(forceCmd) {
     const g = this.g;
-    const el = $('#selection');
-    if (!el || g.state !== 'play') return;
+    const root = $('#selection');
+    if (!root || g.state !== 'play') return;
+    const el = $('.info', root);
     const ents = [...g.selection].map((id) => g.world.get(id)).filter(Boolean);
+    this.renderCmdBar(forceCmd);
     if (!ents.length) {
       el.innerHTML = `<div class="dim">No selection. Drag to box-select · Ctrl+A all ships · double-click a ship for its whole class.</div>`;
       return;
     }
     const bar = (e) => `<div class="bars"><i class="s" style="width:${e.maxShield ? clamp(e.shield / e.maxShield, 0, 1) * 100 : 0}%"></i><i class="h" style="width:${clamp(e.hull / e.maxHull, 0, 1) * 100}%"></i></div>`;
+    const subs = (e) =>
+      e.subs
+        ? `<div class="subs">${Object.entries(e.subs)
+            .map(([k, sb]) => `<span class="sub ${sb.hp <= 0 ? 'off' : sb.hp < sb.max * 0.5 ? 'low' : ''}" title="${SUBSYSTEMS[k].name}${sb.hp <= 0 ? ': ' + SUBSYSTEMS[k].effect : ''}">${SUBSYSTEMS[k].name} ${Math.max(0, Math.round((sb.hp / sb.max) * 100))}%</span>`)
+            .join('')}</div>`
+        : '';
     if (ents.length === 1) {
       const e = ents[0];
       let extra = '';
@@ -217,19 +259,72 @@ export class UI {
         }
         extra = `<div class="wl">${e.weapons.map((w) => w.name).join(' · ') || 'unarmed'}</div>
           ${e.slots ? `<div class="slots">${slots.join('')}</div>` : ''}
-          ${e.network ? `<div class="tag">Network link ×${e.network} (+${e.network * 8}% dmg)</div>` : ''}
+          ${e.rank ? `<div class="tag good">Veteran crew ${'★'.repeat(e.rank)} (+${e.rank * 8}% dmg)</div>` : e.style === 'ascendancy' ? `<div class="tag">Crew XP ${Math.floor(e.xp || 0)}</div>` : ''}
+          ${e.style === 'array' && e.role !== 'flagship' && !e.captured ? (e.linked ? `<div class="tag">Command link · network ×${e.network} (+${e.network * 8}% dmg)</div>` : `<div class="tag bad">Isolated — no command link</div>`) : ''}
           ${e.engineDamaged ? `<div class="tag bad">Engines crippled — vulnerable to boarding</div>` : ''}
+          ${e.inStorm ? `<div class="tag bad">In ion storm — no shield recharge</div>` : ''}
           ${e.repairRate ? `<div class="tag">Repairs nearby allies</div>` : ''}
+          ${e.role === 'boarder' ? `<div class="tag">Boards and captures disabled ships</div>` : ''}
           ${e.visual.hangars ? `<div class="tag">Carrier: launches fighters near enemies</div>` : ''}`;
       } else if (e.kind === 'wreck') extra = `<div class="dim">Right-click it with a ship selected to investigate.</div>`;
       else if (g.world.civ && e.team !== 'player') extra = `<div class="dim">Part of ${esc(g.world.civ.state.intel.contact ? g.world.civ.name : 'an unknown civilization')}. Open the dossier (C).</div>`;
-      el.innerHTML = `<h4>${esc(e.name)}</h4><div class="cls">${esc(e.cls || '')}${e.hybrid ? ' · integrated' : ''}${e.alliedFrom ? ' · allied specialist' : ''}</div>
-        ${e.maxHull > 1 ? bar(e) + `<div class="nums">Hull ${Math.ceil(e.hull)}/${Math.ceil(e.maxHull)} · Shield ${Math.ceil(e.shield)}/${Math.ceil(e.maxShield)}</div>` : ''}${extra}`;
+      el.innerHTML = `<h4>${esc(e.name)}</h4><div class="cls">${esc(e.cls || '')}${e.hybrid ? ' · integrated' : ''}${e.captured ? ' · captured' : ''}${e.alliedFrom ? ' · allied specialist' : ''}</div>
+        ${e.maxHull > 1 ? bar(e) + `<div class="nums">Hull ${Math.ceil(e.hull)}/${Math.ceil(e.maxHull)} · Shield ${Math.ceil(e.shield)}/${Math.ceil(e.maxShield)}</div>` : ''}${subs(e)}${extra}`;
     } else {
       el.innerHTML = `<h4>${ents.length} selected</h4><div class="grid">${ents
-        .map((e) => `<div class="mini" title="${esc(e.name)}"><b>${esc((e.cls || e.name).split(' ')[0])}</b>${bar(e)}</div>`)
-        .join('')}</div><div class="dim">Right-click: move/attack/scan · X stop · Z/V raise/lower</div>`;
+        .map((e) => `<div class="mini" title="${esc(e.name)}"><b>${esc((e.cls || e.name).split(' ')[0])}${e.rank ? ' ' + '★'.repeat(e.rank) : ''}</b>${bar(e)}</div>`)
+        .join('')}</div>`;
     }
+  }
+
+  // Formation presets, stance orders and subsystem focus. Re-rendered only when inputs change
+  // so its buttons stay stable under the cursor.
+  renderCmdBar(force) {
+    const g = this.g;
+    const el = $('#cmdbar');
+    const ships = g.commandable();
+    const tgt = ships.length && ships[0].focus ? g.world.get(ships[0].focus) : null;
+    const sig = ships.map((s) => s.id).join(',') + '|' + g.formation + '|' + (tgt && tgt.subs && g.world.hostile(ships[0], tgt) ? tgt.id + (ships[0].subFocus || '') : '');
+    if (sig === this.cmdSig && !force) return;
+    this.cmdSig = sig;
+    if (!ships.length) {
+      el.innerHTML = '';
+      return;
+    }
+    const F = [['keep', 'Keep'], ['core', 'Core'], ['line', 'Line'], ['encircle', 'Encircle']];
+    let html = `<div class="cmdrow"><span class="dim">Formation</span>${F.map(([k, n]) => `<button data-f="${k}" class="${g.formation === k ? 'on' : ''}">${n}</button>`).join('')}</div>
+      <div class="cmdrow"><button data-c="hold" title="P">Hold</button><button data-c="withdraw" title="U">Withdraw</button><button data-c="stop" title="X">Stop</button><button data-c="up" title="Z">▲</button><button data-c="down" title="V">▼</button></div>`;
+    if (tgt && tgt.subs && g.world.hostile(ships[0], tgt)) {
+      html += `<div class="cmdrow"><span class="dim">Target ${esc(tgt.name)}:</span>${Object.keys(tgt.subs).map((k) => `<button data-sub="${k}" class="${ships[0].subFocus === k ? 'on' : ''}">${SUBSYSTEMS[k].name}</button>`).join('')}</div>`;
+    }
+    el.innerHTML = html;
+    el.querySelectorAll('[data-f]').forEach((b) => (b.onclick = () => g.setFormation(b.dataset.f)));
+    el.querySelectorAll('[data-sub]').forEach((b) => (b.onclick = () => { g.focusSubsystem(b.dataset.sub); this.renderCmdBar(true); }));
+    el.querySelectorAll('[data-c]').forEach((b) => {
+      b.onclick = () => {
+        const c = b.dataset.c;
+        if (c === 'hold') g.holdSelection();
+        if (c === 'withdraw') g.withdrawSelection();
+        if (c === 'stop') g.stopSelection();
+        if (c === 'up') g.elevate(25);
+        if (c === 'down') g.elevate(-25);
+      };
+    });
+  }
+
+  renderAbilities(force) {
+    const g = this.g;
+    const el = $('#abilities');
+    if (!el || g.state !== 'play') return;
+    const list = ABILITIES[g.faction];
+    const states = list.map((_, i) => abilityState(g, i));
+    const sig = states.map((s) => s.block || 'ok').join('|');
+    if (sig === this.abSig && !force) return;
+    this.abSig = sig;
+    el.innerHTML = states
+      .map((st, i) => `<button data-ab="${i}" class="${st.block ? 'cd' : 'ready'}" title="${esc(st.ab.desc)}"><b>${st.ab.name}</b><small>${st.block || 'Ready'} · ${st.ab.key}</small></button>`)
+      .join('');
+    el.querySelectorAll('[data-ab]').forEach((b) => (b.onclick = () => g.ability(+b.dataset.ab)));
   }
 
   // ---------------- Modals ----------------
@@ -281,11 +376,16 @@ export class UI {
       <tr><td>F · T · Tab · H</td><td>Return to fleet · track selection · cycle camera scale · focus station</td></tr>
       <tr><td>Z / V</td><td>Raise / lower selected ships (deliberate vertical manoeuvres)</td></tr>
       <tr><td>X · Ctrl+A · Esc</td><td>Stop · select all · close / deselect</td></tr>
-      <tr><td>E · B · R · C · G</td><td>Expedition · Shipyard · Adaptation bay · Dossier · Galaxy map</td></tr>
+      <tr><td>E · B · R · C · G · Y</td><td>Expedition · Shipyard · Adaptation bay · Dossier · Galaxy map · Research</td></tr>
+      <tr><td>J · K</td><td>Faction abilities (centred on the flagship)</td></tr>
+      <tr><td>P · U · M</td><td>Hold position · withdraw to the jump point · mute</td></tr>
+      <tr><td>Right click a friendly ship</td><td>Escort it</td></tr>
       <tr><td>Touch</td><td>Tap select/order · drag orbit · pinch zoom/pan · long-press radial menu</td></tr>
       </table>
       <h3>Combat notes</h3>
       <p>Escorts' light weapons shred fighters; heavy guns hit capitals and stations hard but miss small craft. Ships below 35% hull limp with crippled engines — Bloom spores devour them. Repair ships mend nearby allies. Your home station repairs everything near it.</p>
+      <p>Capital ships and stations have engines, weapons, shields and command. Attack one, then pick a subsystem in the selection panel to focus fire. Disabled engines leave a ship adrift: boarding craft (and Bloom escorts) can then capture it. Knocking out a capital's command speeds its surrender.</p>
+      <p>Ion storms stop shields recharging and shorten weapon range. Plan routes around them — or lure enemies in.</p>
       <p>Damaging a capital below 25% breaks its defences and your ships hold fire. Hold ships nearby to force surrender (intact shipyards) or explicitly order an attack to destroy it (more salvage, no shipyards).</p>`);
   }
 
@@ -321,8 +421,8 @@ export class UI {
     const f = g.fac;
     const html = `<h2>${f.name} production</h2>
       <p class="dim">${f.name} ${f.production} its ships. Materials: <b>${Math.floor(g.materials)}</b></p>
-      <div class="builds">${[...(g.allPlayerShips().some((e) => e.role === 'flagship') || g.buildQueue.some((e) => e.role === 'flagship') ? [] : ['flagship']), 'escort', 'scout', 'repair']
-        .map((r) => `<div class="b"><h3>${f.names[r]}</h3><p class="dim">${{ flagship: 'Your flagship was lost. Replace it.', escort: 'Line combatant. Light weapons tear through fighters.', scout: 'Fast. Scans three times faster, revealing intel.', repair: 'Mends the hull of nearby allies in battle.' }[r]}</p><p>◈ ${SHIP_COST[r]} · ${BUILD_TIME[r]}s</p><button data-r="${r}" ${g.materials < SHIP_COST[r] ? 'disabled' : ''}>${{ grows: 'Grow', assembles: 'Assemble', launches: 'Launch' }[f.production]}</button></div>`)
+      <div class="builds">${[...(g.allPlayerShips().some((e) => e.role === 'flagship') || g.buildQueue.some((e) => e.role === 'flagship') ? [] : ['flagship']), 'escort', 'scout', 'repair', ...(g.research.boarding ? ['boarder'] : [])]
+        .map((r) => `<div class="b"><h3>${f.names[r]}</h3><p class="dim">${{ boarder: 'Captures ships whose engines are disabled.', flagship: 'Your flagship was lost. Replace it.', escort: 'Line combatant. Light weapons tear through fighters.', scout: 'Fast. Scans three times faster, revealing intel.', repair: 'Mends the hull of nearby allies in battle.' }[r]}</p><p>◈ ${SHIP_COST[r]} · ${BUILD_TIME[r]}s</p>${r === 'boarder' ? '' : ''}<button data-r="${r}" ${g.materials < SHIP_COST[r] ? 'disabled' : ''}>${{ grows: 'Grow', assembles: 'Assemble', launches: 'Launch' }[f.production]}</button></div>`)
         .join('')}</div>
       ${g.buildQueue.length ? `<h3>In production</h3>${g.buildQueue.map((e) => `<div class="row">${esc(e.name)} — ${Math.floor(e.building.t * 100)}%</div>`).join('')}` : ''}`;
     if (refresh && this.modalKind === 'yard') {
@@ -480,9 +580,12 @@ export class UI {
           const hidden = ans.ev ? ans.ev.factors.filter((f) => !f.known).length : 0;
           res = `<div class="answer ${ans.ok ? 'ok' : 'no'}">${ans.text ? esc(ans.text) : ans.ok ? 'Accepted.' : ans.same ? 'Rejected — they have already answered this offer. Nothing has changed.' : 'Rejected.'}
             ${known.length ? `<ul>${known.map((f) => `<li class="${f.v >= 0 ? 'pos' : 'neg'}">${f.v >= 0 ? '+' : ''}${f.v} ${esc(f.label)}</li>`).join('')}</ul>` : ''}
-            ${hidden ? `<div class="unk">${hidden} other consideration${hidden > 1 ? 's' : ''} you have not uncovered.</div>` : ''}</div>`;
+            ${hidden ? `<div class="unk">${hidden} other consideration${hidden > 1 ? 's' : ''} you have not uncovered.</div>` : ''}
+            ${ans.counter ? `<div class="counter"><b>Their terms:</b> ${esc(ans.counter.text)} ${['materials', 'knowledge'].includes(ans.counter.kind) ? `<button data-counter="${pid}">Accept terms</button>` : ans.counter.kind === 'mission' ? `<button data-a="help">Take on the mission</button>` : ''}</div>` : ''}</div>`;
         }
-        return `<div class="prop ${done ? 'done' : ''}"><b>${P.name}</b> <span class="dim">${P.desc}</span> ${done ? '<span class="tag good">In force</span>' : `<button data-p="${pid}" ${s.hostile ? 'disabled' : ''}>Propose</button>`}${res}</div>`;
+        const ol = done || s.hostile ? null : outlook(this.g, civ, pid);
+        return `<div class="prop ${done ? 'done' : ''}"><b>${P.name}</b> <span class="dim">${P.desc}</span> ${done ? '<span class="tag good">In force</span>' : `<button data-p="${pid}" ${s.hostile ? 'disabled' : ''}>Propose</button>`}
+          ${ol ? `<div class="outlook ${ol.cls}">Outlook: <b>${ol.text}</b>${ol.hidden ? ` <span class="dim">(${ol.hidden} unknown factor${ol.hidden > 1 ? 's' : ''} — gather intel to narrow it)</span>` : ''}</div>` : ''}${res}</div>`;
       })
       .join('')}</div>`;
   }
@@ -539,6 +642,18 @@ export class UI {
         again();
       };
     });
+    m.querySelectorAll('[data-counter]').forEach((b) => {
+      b.onclick = () => {
+        const pid = b.dataset.counter;
+        const ans = this.lastAnswer[civ.id + pid];
+        const err = acceptCounter(g, civ, pid, ans.counter);
+        if (err) return this.log(err, 'warn');
+        const res = propose(g, civ, pid);
+        this.lastAnswer[civ.id + pid] = res;
+        if (res.ok) this.log(`${PROPOSALS[pid].name} accepted by ${civ.name}.`, 'good');
+        again();
+      };
+    });
     m.querySelectorAll('[data-p]').forEach((b) => {
       b.onclick = () => {
         const res = propose(g, civ, b.dataset.p);
@@ -554,8 +669,7 @@ export class UI {
     const g = this.g;
     if (g.state !== 'play') return;
     this.galaxyOpen = !this.galaxyOpen;
-    const el = $('#galaxy');
-    el.style.display = this.galaxyOpen ? 'block' : 'none';
+    $('#galaxy').style.display = this.galaxyOpen ? 'block' : 'none';
     if (this.galaxyOpen) {
       this.closeModal();
       this.gSel = this.gSel || null;
@@ -569,11 +683,33 @@ export class UI {
       c.width = W;
       c.height = H;
     }
-    const s = Math.min(W, H) / 560;
-    return { c, W, H, s, cx: W * 0.42, cy: H * 0.5 };
+    const s = Math.min(W * 0.62, H) / 820;
+    return { c, W, H, s, cx: W * 0.38, cy: H * 0.52 };
   }
   sysScreen(L, p) {
     return [L.cx + p[0] * L.s, L.cy + p[1] * L.s];
+  }
+  // Map state for a system, shown with icons and patterns as well as colour.
+  mapState(sd) {
+    const g = this.g;
+    const st = sysState(g, sd.id);
+    const threat = st.threat ? Math.max(0, Math.round(st.threat.deadline - g.stime)) : null;
+    if (sd.id === 'home') return { key: 'owned', icon: '■', label: 'Home', threat };
+    if (!g.known.has(sd.id)) return { key: 'unknown', icon: '', label: '', threat: null };
+    if (sd.kind === 'empty') {
+      if (sd.empty.kind === 'relay' && g.relayActive) return { key: 'relay', icon: '⌬', label: 'Relay online', threat };
+      return { key: st.visited ? 'surveyed' : 'unexplored', icon: st.visited ? '○' : '?', label: st.visited ? 'Surveyed' : 'Unexplored', threat };
+    }
+    const cs = sd.civ.state;
+    const contested = st.contestedUntil > g.stime || threat != null;
+    if (cs.integrating) return { key: 'integrating', icon: '⟳', label: 'Integrating', threat };
+    if (cs.status === 'protectorate') return { key: 'protectorate', icon: '◇', label: 'Protectorate', threat };
+    if (cs.status === 'conquered' || cs.status === 'assimilated') return { key: contested ? 'contested' : 'owned', icon: contested ? '⚠' : '■', label: contested ? 'Occupied — contested' : cs.status === 'conquered' ? 'Occupied' : 'Integrated', threat };
+    if (cs.status === 'allied') return { key: 'allied', icon: '✦', label: 'Allied', threat };
+    if (cs.status === 'hostile') return { key: 'hostile', icon: '✕', label: 'At war', threat };
+    if (cs.status === 'devastated') return { key: 'devastated', icon: '✝', label: 'Devastated', threat };
+    if (!cs.visited) return { key: 'unexplored', icon: '?', label: 'Unexplored', threat };
+    return { key: 'contacted', icon: '●', label: STATUS_LABEL[cs.status], threat };
   }
   drawGalaxy() {
     const g = this.g;
@@ -582,9 +718,9 @@ export class UI {
     const t = performance.now() / 1000;
     ctx.fillStyle = '#04060c';
     ctx.fillRect(0, 0, L.W, L.H);
-    const gs = L.s * 0.55;
-    const core = [L.cx - 380 * gs, L.cy + 120 * gs];
-    const cg = ctx.createRadialGradient(core[0], core[1], 0, core[0], core[1], 520 * gs);
+    const gs = L.s * 0.9;
+    const core = [L.cx - 420 * gs, L.cy + 160 * gs];
+    const cg = ctx.createRadialGradient(core[0], core[1], 0, core[0], core[1], 620 * gs);
     cg.addColorStop(0, 'rgba(255,220,170,0.22)');
     cg.addColorStop(0.3, 'rgba(160,130,220,0.08)');
     cg.addColorStop(1, 'rgba(0,0,0,0)');
@@ -592,105 +728,163 @@ export class UI {
     ctx.fillRect(0, 0, L.W, L.H);
     for (const f of g.galaxy.far) {
       const x = L.cx + f.pos[0] * gs, y = L.cy + f.pos[1] * gs;
-      ctx.fillStyle = col.css(col.hsl(0.55 + f.hue * 0.15, 0.4, 0.75), f.b * 0.7);
-      const sz = 0.8 + f.b * 1.4;
+      ctx.fillStyle = col.css(col.hsl(0.55 + f.hue * 0.15, 0.4, 0.75), f.b * 0.6);
+      const sz = 0.8 + f.b * 1.3;
       ctx.fillRect(x, y, sz, sz);
     }
-    ctx.fillStyle = 'rgba(160,180,255,0.4)';
+    ctx.fillStyle = 'rgba(160,180,255,0.45)';
     ctx.font = '11px "Trebuchet MS", sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText('Thousands of systems lie beyond jump range. Expand your relay network to reach them.', 20, L.H - 20);
+    ctx.fillText('Thousands of systems lie beyond this cluster. Expand your relay network to reach them.', 20, L.H - 20);
     const sys = g.galaxy.systems;
-    const home = sys[0];
-    // Lanes
-    ctx.lineWidth = 1;
-    for (const s of sys.slice(1)) {
-      const a = this.sysScreen(L, home.pos), b = this.sysScreen(L, s.pos);
-      ctx.strokeStyle = 'rgba(120,170,255,0.35)';
-      ctx.setLineDash([4, 6]);
-      ctx.beginPath();
-      ctx.moveTo(a[0], a[1]);
-      ctx.lineTo(b[0], b[1]);
-      ctx.stroke();
-    }
-    for (let i = 1; i < sys.length - 1; i++) {
-      const a = this.sysScreen(L, sys[i].pos), b = this.sysScreen(L, sys[i + 1].pos);
-      ctx.strokeStyle = 'rgba(120,170,255,0.15)';
-      ctx.beginPath();
-      ctx.moveTo(a[0], a[1]);
-      ctx.lineTo(b[0], b[1]);
-      ctx.stroke();
+    const byId = Object.fromEntries(sys.map((x) => [x.id, x]));
+    const fc = g.fac.color;
+    // Lanes between surveyed systems; routes from your current position are brighter.
+    const drawn = new Set();
+    for (const a of sys) {
+      for (const id of a.links) {
+        const k = [a.id, id].sort().join('|');
+        if (drawn.has(k)) continue;
+        drawn.add(k);
+        const b = byId[id];
+        if (!g.known.has(a.id) && !g.known.has(b.id)) continue;
+        const both = g.known.has(a.id) && g.known.has(b.id);
+        const live = a.id === g.currentSystem || b.id === g.currentSystem;
+        const [x0, y0] = this.sysScreen(L, a.pos), [x1, y1] = this.sysScreen(L, b.pos);
+        ctx.strokeStyle = live ? 'rgba(140,220,255,0.75)' : both ? 'rgba(120,170,255,0.32)' : 'rgba(120,170,255,0.12)';
+        ctx.lineWidth = live ? 1.6 : 1;
+        ctx.setLineDash(live ? [] : [4, 6]);
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+      }
     }
     ctx.setLineDash([]);
-    const fc = g.fac.color;
-    for (const s of sys) {
-      const [x, y] = this.sysScreen(L, s.pos);
-      const civ = s.civ;
-      const st = civ ? civ.state.status : 'home';
-      const owned = st === 'home' || ['conquered', 'assimilated', 'protectorate'].includes(st);
-      if (owned) {
-        const gr = ctx.createRadialGradient(x, y, 0, x, y, 70 * L.s);
-        gr.addColorStop(0, col.css(fc, 0.28));
+    if (g.relayActive) {
+      const r = sys.find((x) => x.id === 'sys-relay');
+      const [rx, ry] = this.sysScreen(L, r.pos);
+      ctx.strokeStyle = 'rgba(120,255,180,0.18)';
+      for (const x of sys) {
+        if (x === r || !g.known.has(x.id)) continue;
+        const [sx, sy] = this.sysScreen(L, x.pos);
+        ctx.beginPath();
+        ctx.moveTo(rx, ry);
+        ctx.quadraticCurveTo((rx + sx) / 2, (ry + sy) / 2 - 40, sx, sy);
+        ctx.stroke();
+      }
+    }
+    for (const sd of sys) {
+      const [x, y] = this.sysScreen(L, sd.pos);
+      const ms = this.mapState(sd);
+      const known = g.known.has(sd.id);
+      const sc = !known ? [0.5, 0.55, 0.65] : sd.civ ? sd.civ.sys.star : sd.empty ? sd.empty.sys.star : FACTIONS[g.faction].home.star;
+      const R0 = 30 * L.s * 1.6;
+      // Territory and relationship presentation
+      if (ms.key === 'owned' || ms.key === 'contested' || ms.key === 'protectorate') {
+        const gr = ctx.createRadialGradient(x, y, 0, x, y, R0 * 2.2);
+        gr.addColorStop(0, col.css(fc, ms.key === 'protectorate' ? 0.16 : 0.3));
         gr.addColorStop(1, col.css(fc, 0));
         ctx.fillStyle = gr;
         ctx.beginPath();
-        ctx.arc(x, y, 70 * L.s, 0, Math.PI * 2);
+        ctx.arc(x, y, R0 * 2.2, 0, Math.PI * 2);
         ctx.fill();
       }
-      if (st === 'allied') {
-        ctx.strokeStyle = col.css(fc, 0.8);
-        ctx.setLineDash([3, 4]);
+      ctx.lineWidth = 1.5;
+      if (ms.key === 'contested') {
+        ctx.strokeStyle = 'rgba(255,170,60,0.9)';
+        ctx.setLineDash([6, 4]);
         ctx.beginPath();
-        ctx.arc(x, y, 30 * L.s, 0, Math.PI * 2);
+        ctx.arc(x, y, R0, 0, Math.PI * 2);
         ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      if (st === 'hostile') {
-        ctx.strokeStyle = 'rgba(255,90,70,0.8)';
+      } else if (ms.key === 'integrating') {
+        ctx.strokeStyle = 'rgba(190,140,255,0.9)';
+        ctx.setLineDash([8, 6]);
+        ctx.lineDashOffset = -t * 30;
         ctx.beginPath();
-        ctx.arc(x, y, 26 * L.s, 0, Math.PI * 2);
+        ctx.arc(x, y, R0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineDashOffset = 0;
+      } else if (ms.key === 'allied') {
+        ctx.strokeStyle = col.css(fc, 0.9);
+        ctx.beginPath();
+        ctx.arc(x, y, R0, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (ms.key === 'protectorate') {
+        ctx.strokeStyle = col.css(fc, 0.9);
+        ctx.beginPath();
+        ctx.arc(x, y, R0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        ctx.arc(x, y, R0 * 1.2, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (ms.key === 'hostile') {
+        ctx.strokeStyle = 'rgba(255,90,70,0.85)';
+        ctx.beginPath();
+        ctx.arc(x, y, R0, 0, Math.PI * 2);
         ctx.stroke();
       }
-      const sc = civ ? civ.sys.star : FACTIONS[g.faction].home.star;
-      ctx.fillStyle = col.css(sc, 1);
+      ctx.setLineDash([]);
+      ctx.fillStyle = col.css(sc, known ? 1 : 0.5);
       ctx.shadowColor = col.css(sc, 1);
-      ctx.shadowBlur = 14;
+      ctx.shadowBlur = known ? 14 : 4;
       ctx.beginPath();
-      ctx.arc(x, y, (civ && civ.stellar === 'binary' ? 5 : 6) * Math.max(1, L.s), 0, Math.PI * 2);
+      ctx.arc(x, y, known ? 6 : 3.5, 0, Math.PI * 2);
       ctx.fill();
-      if (civ && civ.stellar === 'binary') {
+      const binary = (sd.civ && sd.civ.stellar === 'binary') || (sd.empty && sd.empty.stellar === 'binary');
+      if (known && binary) {
         ctx.beginPath();
         ctx.arc(x + 8, y - 4, 3.5, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.shadowBlur = 0;
-      if (g.currentSystem === s.id) {
+      if (g.currentSystem === sd.id) {
         ctx.strokeStyle = 'rgba(120,255,160,0.9)';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(x, y, 14 + Math.sin(t * 3) * 2, 0, Math.PI * 2);
+        ctx.arc(x, y, 13 + Math.sin(t * 3) * 2, 0, Math.PI * 2);
         ctx.stroke();
-        ctx.lineWidth = 1;
       }
-      if (this.gSel === s.id || this.gHover === s.id) {
+      ctx.lineWidth = 1;
+      if (this.gSel === sd.id || this.gHover === sd.id) {
         ctx.strokeStyle = '#fff';
         ctx.strokeRect(x - 18, y - 18, 36, 36);
       }
-      ctx.fillStyle = '#dfe8ff';
       ctx.textAlign = 'center';
-      ctx.font = '13px "Trebuchet MS", sans-serif';
-      const label = s.id === 'home' ? g.fac.home.name : civ.state.intel.contact ? civ.name : civ.state.visited ? `${civ.texts.stellar.name} (inhabited)` : 'Unknown signal';
-      ctx.fillText(label, x, y + 28);
-      ctx.font = '11px "Trebuchet MS", sans-serif';
-      if (civ) {
-        ctx.fillStyle = st === 'hostile' ? '#f97' : owned || st === 'allied' ? col.css(fc) : '#9ab';
-        ctx.fillText(STATUS_LABEL[st], x, y + 42);
-        if (civ.state.pressure > 0.5 && !civ.state.helped && !owned && st !== 'allied') {
-          ctx.fillStyle = '#f86';
-          ctx.fillText(`${civ.neighbor} pressure rising`, x, y + 55);
+      if (!known) {
+        if (g.research.deepscan) {
+          ctx.fillStyle = 'rgba(170,185,215,0.7)';
+          ctx.font = '11px "Trebuchet MS", sans-serif';
+          ctx.fillText(sd.kind === 'civ' ? 'Inhabited signature' : 'Faint signature', x, y + 20);
         }
+        continue;
+      }
+      ctx.font = '13px "Trebuchet MS", sans-serif';
+      ctx.fillStyle = '#dfe8ff';
+      const label = sd.id === 'home' ? g.fac.home.name : sd.civ ? (sd.civ.state.intel.contact ? sd.civ.name : sd.civ.state.visited ? `${sd.civ.texts.stellar.name} (inhabited)` : 'Unknown signal') : sysState(g, sd.id).visited ? sd.name : 'Uncharted signal';
+      ctx.fillText(label, x, y + 27);
+      ctx.font = '11px "Trebuchet MS", sans-serif';
+      ctx.fillStyle = ms.key === 'hostile' ? '#f97' : ['owned', 'allied', 'protectorate', 'relay'].includes(ms.key) ? col.css(fc) : ms.key === 'contested' ? '#fb6' : ms.key === 'integrating' ? '#c9f' : '#9ab';
+      if (ms.label) ctx.fillText(`${ms.icon} ${ms.label}`, x, y + 41);
+      if (ms.threat != null) {
+        ctx.fillStyle = `rgba(255,${120 + 60 * Math.sin(t * 5)},90,1)`;
+        ctx.fillText(`⚠ RAID — ${ms.threat}s`, x, y - 16);
+      }
+      const civ = sd.civ;
+      if (civ && civ.state.pressure > 0.5 && !civ.state.helped && !['owned', 'contested', 'allied', 'protectorate', 'devastated'].includes(ms.key)) {
+        ctx.fillStyle = '#f86';
+        ctx.fillText(`${civ.neighbor} pressure rising`, x, y + 54);
       }
     }
+    // Legend
+    ctx.textAlign = 'left';
+    ctx.font = '11px "Trebuchet MS", sans-serif';
+    const leg = [['■', 'Controlled'], ['⚠', 'Contested'], ['⟳', 'Integrating'], ['✦', 'Allied'], ['◇', 'Protectorate'], ['✕', 'At war'], ['?', 'Unexplored']];
+    leg.forEach(([i, n], k) => {
+      ctx.fillStyle = 'rgba(200,215,240,0.75)';
+      ctx.fillText(`${i}  ${n}`, 20, 110 + k * 16);
+    });
   }
   galaxyHit(e) {
     const L = this.galaxyLayout();
@@ -715,35 +909,99 @@ export class UI {
   renderGalaxyPanel() {
     const g = this.g;
     const p = $('#galaxy .gpanel');
-    const s = g.galaxy.systems.find((x) => x.id === this.gSel);
-    if (!s) {
-      p.innerHTML = `<h3>Galaxy</h3><p class="dim">Select a system. Jump lanes connect your home to three detected signals.</p>${g.driveReady ? '' : '<p class="bad">Jump drive uncalibrated — investigate the wreck at home.</p>'}`;
+    const sd = g.galaxy.systems.find((x) => x.id === this.gSel);
+    const res = `<p class="dim">◈ ${Math.floor(g.materials)} · ϟ ${Math.floor(g.energy)} · ✧ ${Math.floor(g.knowledge)}${g.income ? ` — income ◈${g.income.mat.toFixed(1)}/s ϟ${g.income.en.toFixed(2)}/s` : ''}</p>`;
+    if (!sd) {
+      p.innerHTML = `<h3>The cluster</h3><p class="dim">Select a system. You can jump along lanes from where you are; home is always one jump away. Each jump costs energy.</p>${res}${g.driveReady ? '' : '<p class="bad">Jump drive uncalibrated — investigate the wreck at home.</p>'}`;
       return;
     }
-    const here = g.currentSystem === s.id;
+    const st = sysState(g, sd.id);
+    const ms = this.mapState(sd);
     let body = '';
-    if (s.id === 'home') {
-      body = `<h3>${esc(g.fac.home.name)}</h3><p>Your home system. Repairs, production and refits.</p>`;
+    if (sd.id === 'home') body = `<h3>${esc(g.fac.home.name)}</h3><p>Your home system: production, research, repairs and refits.</p>`;
+    else if (!g.known.has(sd.id)) body = `<h3>Unsurveyed</h3><p class="dim">No route data. Explore neighbouring systems to chart the lanes here.</p>`;
+    else if (sd.kind === 'empty') {
+      const e = sd.empty;
+      body = `<h3>${st.visited ? esc(e.texts.name) : 'Uncharted signal'}</h3><p>${st.visited ? esc(e.texts.desc) : 'A faint signature. No inhabitants detected at this range.'}</p>${e.storms.length && st.visited ? '<p class="dim">Ion storms present.</p>' : ''}`;
     } else {
-      const c = s.civ;
+      const c = sd.civ;
       const I = c.state.intel;
       body = `<h3>${I.contact ? esc(c.name) : 'Unknown signal'}</h3>
-        <p>${c.state.visited ? `${c.texts.stellar.name}. ${c.texts.habitat.name}.` : 'Coordinates recovered from the wreck. Inhabited.'}</p>
-        <p>Status: <b>${STATUS_LABEL[c.state.status]}</b></p>
+        <p>${c.state.visited ? `${c.texts.stellar.name}. ${c.texts.habitat.name}.` : 'Inhabited. Defences unknown.'}</p>
+        <p>Status: <b>${ms.icon} ${ms.label}</b></p>
         ${I.signature ? `<p>Signature: <b>${TRAITS[c.signature].name}</b></p>` : ''}
         ${c.state.pressure > 0.5 && !c.state.helped ? `<p class="bad">The ${esc(c.neighbor)} grow bolder while you are away.</p>` : ''}`;
+      if (['conquered', 'assimilated', 'protectorate'].includes(c.state.status)) {
+        body += `<h4>System role</h4><div class="btnrow">${Object.entries(SYSTEM_ROLES).map(([k, r]) => `<button data-role="${k}" class="${st.role === k ? 'on' : ''}" title="${r.desc}">${r.name}</button>`).join('')}</div><p class="dim">${st.role ? SYSTEM_ROLES[st.role].desc : 'Choose what its governor prioritises.'}</p>`;
+      }
     }
+    if (ms.threat != null) body += `<p class="bad">⚠ Under raid — ${ms.threat}s to respond.</p>`;
+    const here = g.currentSystem === sd.id;
     const plan = g.expeditionPlan;
     const fromHome = g.currentSystem === 'home';
     const n = fromHome ? g.playerShips().filter((e) => !plan.ids || plan.ids.has(e.id)).length : g.playerShips().length;
-    p.innerHTML = body + (here ? `<p class="dim">You are here.</p>` : `<p class="dim">${fromHome ? `Expedition: ${n} ships · objective ${OBJECTIVES[plan.objective].name} (E to change)` : `Fleet: ${n} ships`}</p><button class="primary" id="jumpBtn">Jump</button>`);
+    const reach = g.reachable(sd.id);
+    const cost = g.jumpCost(sd.id, n);
+    let foot;
+    if (here) foot = `<p class="dim">You are here.</p>`;
+    else if (!g.known.has(sd.id) && !reach) foot = '';
+    else if (!reach) foot = `<p class="dim">No direct lane from your position.${g.relayActive ? '' : ' An active relay would link it.'}</p>`;
+    else foot = `<p class="dim">${fromHome ? `Expedition: ${n} ships · objective ${OBJECTIVES[plan.objective].name} (E to change)` : `Fleet: ${n} ships`} · cost <b class="${g.energy < cost ? 'bad' : ''}">ϟ ${cost}</b></p><button class="primary" id="jumpBtn">Jump</button>`;
+    p.innerHTML = body + res + foot;
+    p.querySelectorAll('[data-role]').forEach((b) => (b.onclick = () => { setRole(g, sd.id, b.dataset.role); this.renderGalaxyPanel(); }));
     const jb = $('#jumpBtn', p);
     if (jb)
       jb.onclick = () => {
-        const err = g.startJump(s.id);
+        const err = g.startJump(sd.id);
         if (err) this.log(err, 'warn');
         else this.toggleGalaxy();
       };
+  }
+
+  // ---------------- Research, settings, victory ----------------
+  openResearch() {
+    const g = this.g;
+    if (g.state !== 'play') return;
+    const m = this.openModal('research', `<h2>Research</h2>
+      <p class="dim">Knowledge comes from scanning civilizations, wrecks, leviathans and anomalies, and from research-role systems. You have <b>✧ ${Math.floor(g.knowledge)}</b>.</p>
+      <div class="builds">${Object.entries(RESEARCH)
+        .map(([k, r]) => `<div class="b ${g.research[k] ? 'done' : ''}"><h3>${r.name}</h3><p class="dim">${r.desc}</p><p>✧ ${r.cost}</p>${g.research[k] ? '<span class="tag good">Complete</span>' : `<button data-rs="${k}" ${g.knowledge < r.cost ? 'disabled' : ''}>Research</button>`}</div>`)
+        .join('')}</div>
+      <h3>Your faction</h3><p>${esc(g.fac.blurb)}</p><p class="bad">Weakness: ${esc(WEAKNESS[g.faction])}</p>`);
+    m.querySelectorAll('[data-rs]').forEach((b) => {
+      b.onclick = () => {
+        const err = doResearch(g, b.dataset.rs);
+        if (err) this.log(err, 'warn');
+        this.openResearch();
+      };
+    });
+  }
+  openSettings() {
+    const g = this.g;
+    const st = g.settings;
+    const m = this.openModal('settings', `<h2>Settings</h2>
+      <label class="row">Quality <select id="sQ"><option value="auto">Auto</option><option value="high">High</option><option value="low">Low (mobile)</option></select> <span class="dim">— applies after reload</span></label>
+      <label class="row"><input type="checkbox" id="sD" ${st.dither ? 'checked' : ''}> Retro ordered dithering</label>
+      <label class="row"><input type="checkbox" id="sP" ${st.galaxyPause ? 'checked' : ''}> Pause the local battle while the galaxy map is open</label>
+      <label class="row">Volume <input type="range" id="sV" min="0" max="1" step="0.05" value="${st.volume}"> <span class="dim">(M mutes)</span></label>`);
+    $('#sQ', m).value = st.quality;
+    $('#sQ', m).onchange = (e) => g.applySettings({ quality: e.target.value });
+    $('#sD', m).onchange = (e) => g.applySettings({ dither: e.target.checked });
+    $('#sP', m).onchange = (e) => g.applySettings({ galaxyPause: e.target.checked });
+    $('#sV', m).oninput = (e) => g.applySettings({ volume: +e.target.value });
+  }
+  openVictory() {
+    const g = this.g;
+    const ctl = controlled(g);
+    const allied = Object.values(g.civs).filter((c) => c.state.status === 'allied');
+    this.openModal('victory', `<h2>Regional dominion</h2>
+      <p>The cluster recognises ${esc(g.fac.name)} as its dominant power.</p>
+      <ul>${ctl.map((c) => `<li><b>${esc(c.name)}</b> — ${STATUS_LABEL[c.state.status]}</li>`).join('')}${allied.map((c) => `<li>${esc(c.name)} — allied (influence, not control)</li>`).join('')}</ul>
+      <p>Inheritances: ${Object.keys(g.traits).map((id) => TRAITS[id].name).join(', ') || 'none'}. Relay network: ${g.relayActive ? 'online' : 'dormant'}.</p>
+      <p class="dim">The campaign continues — keep exploring, integrating and expanding as you please.</p>
+      <div class="foot"><button class="primary" id="vOk">Continue</button></div>`);
+    $('#vOk').onclick = () => this.closeModal();
+    this.g.audio.ui('good');
   }
 
   // ---------------- Touch radial menu ----------------
