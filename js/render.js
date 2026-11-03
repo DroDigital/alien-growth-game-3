@@ -89,6 +89,28 @@ export function renderWorld(game, world, cam, R, viewH) {
     R.beam(a, c, b.width * 0.3, [1, 1, 1], k * 0.8);
     R.sprite(c, b.width * 4 * k + 1, b.col, k);
   }
+  // Ion storms: layered violet haze with occasional lightning.
+  for (const st of world.storms || []) {
+    for (const pf of st.puffs) R.sprite(pf.p, pf.s, [0.55, 0.35, 0.95], 0.09);
+    if (Math.random() < 0.08) {
+      const a = st.puffs[Math.floor(Math.random() * st.puffs.length)].p, b = st.puffs[Math.floor(Math.random() * st.puffs.length)].p;
+      R.beam(a, b, 2.5, [0.8, 0.7, 1], 0.9);
+    }
+  }
+  // Boarding grapples
+  for (const e of world.entities) {
+    if (!e.boarding) continue;
+    const tg = world.get(e.boarding);
+    if (tg) R.beam(e.pos, tg.pos, 0.7, e.style === 'bloom' ? [0.5, 1, 0.6] : [1, 0.8, 0.4], 0.5 + 0.3 * Math.sin(t * 12));
+  }
+  // Ability auras
+  for (const e of world.entities) {
+    if (e.dead) continue;
+    if (e.hotT > 0) R.sprite(e.pos, e.radius * 1.2, [0.4, 1, 0.6], 0.25, 2);
+    if (e.overT > 0) R.sprite(e.pos, e.radius * 1.1, [0.4, 0.85, 1], 0.25, 2);
+    if (e.braceT > 0) R.sprite(e.pos, e.radius * 1.2, [0.6, 0.75, 1], 0.18, 2);
+    if (e.jamT > 0 && Math.random() < 0.3) R.sprite(world.hardpoint(e), e.radius * 0.3, [0.4, 0.9, 1], 0.8);
+  }
   // Scanning beams
   for (const e of world.entities) {
     if (e.scanning) {
@@ -192,6 +214,13 @@ export function drawOverlay(ctx, game, world, cam, R, W, H) {
   const sys = cam.dist > 1100;
   ctx.font = '11px "Trebuchet MS", sans-serif';
   ctx.textAlign = 'center';
+  for (const st of world.storms || []) {
+    const p = R.project(st.pos, W, H);
+    if (p) {
+      ctx.fillStyle = 'rgba(190,160,255,0.75)';
+      ctx.fillText('ION STORM — shields will not recharge · range −30%', p[0], p[1]);
+    }
+  }
   // Body labels at system scale
   if (sys) {
     for (const b of world.bodies) {
@@ -268,6 +297,32 @@ export function drawOverlay(ctx, game, world, cam, R, W, H) {
       if (e.broken) {
         ctx.fillStyle = '#fc6';
         ctx.fillText('DEFENCES BROKEN', p[0], y + 16);
+      }
+      // Subsystem pips: engines, weapons, shields, command.
+      if (e.subs && (selected || hover || recent)) {
+        const keys = Object.keys(e.subs);
+        keys.forEach((k, i) => {
+          const sb = e.subs[k];
+          const x = p[0] - bw / 2 + i * 13;
+          const f = clamp(sb.hp / sb.max, 0, 1);
+          ctx.fillStyle = f <= 0 ? '#f43' : f < 0.5 ? '#fb4' : 'rgba(170,200,255,0.8)';
+          ctx.fillRect(x, y - 7, 10, 4);
+          ctx.fillStyle = 'rgba(0,0,0,0.7)';
+          ctx.font = '8px sans-serif';
+          ctx.fillText(k[0].toUpperCase(), x + 5, y - 9);
+        });
+        ctx.font = '11px "Trebuchet MS", sans-serif';
+      }
+      if (e.rank) {
+        ctx.fillStyle = '#fd7';
+        ctx.fillText('★'.repeat(e.rank), p[0] + bw / 2 + 14, y + 6);
+      }
+      if (e.boardP > 0 && e.team !== 'player') {
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(p[0] - bw / 2, y + 22, bw, 4);
+        ctx.fillStyle = '#8f8';
+        ctx.fillRect(p[0] - bw / 2, y + 22, bw * clamp(e.boardP, 0, 1), 4);
+        ctx.fillText('BOARDING', p[0], y + 36);
       }
     }
     // Scan targets

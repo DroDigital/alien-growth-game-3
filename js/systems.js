@@ -3,7 +3,7 @@ import { col, rng, v3, m4 } from './math.js';
 import { MB, T, I, planetMesh, asteroidField } from './meshgen.js';
 import { World } from './sim.js';
 import { FACTIONS, TRAITS } from './data.js';
-import { makeShip, makeHomeStation, makeCivStation, makeLandmark, civShipOpts } from './entities.js';
+import { makeShip, makeHomeStation, makeCivStation, makeLandmark, civShipOpts, raiderOpts } from './entities.js';
 import { addTraitVisual, civStation, getVisual, PAL } from './designs.js';
 
 const meshCache = new Map();
@@ -216,7 +216,7 @@ export function buildCivWorld(game, civ) {
 
   const hazards = [];
   if (civ.stellar === 'remnant') hazards.push({ type: 'pulsar', pos: env.starPos });
-  const world = new World(game, { env, bodies, civ, hazards, kind: 'civ' });
+  const world = new World(game, { env, bodies, civ, hazards, kind: 'civ', storms: prepStorms(civ.storms) });
   world.kind = 'civ';
   world.name = `${civ.texts.stellar.name} — ${civ.species} space`;
   world.arrival = CIV_LAYOUT.arrival;
@@ -280,4 +280,116 @@ export function snapshotCiv(world) {
     station: world.station && !world.station.dead ? { hull: world.station.hull, broken: world.station.broken } : null,
     ships: ships.map((e) => ({ role: e.role, hull: e.hull })),
   };
+}
+
+// Ion storms: readable terrain. Inside one, shields will not recharge and weapon range drops.
+export function prepStorms(list) {
+  return (list || []).map((st, i) => {
+    const r = rng(1000 + i * 77 + Math.round(st.pos[0]));
+    const puffs = [];
+    for (let k = 0; k < 46; k++) {
+      const a = r() * Math.PI * 2, d = Math.sqrt(r()) * st.r * 0.9;
+      puffs.push({ p: [st.pos[0] + Math.cos(a) * d, (r() - 0.5) * st.r * 0.35, st.pos[2] + Math.sin(a) * d], s: st.r * (0.18 + r() * 0.25) });
+    }
+    return { ...st, puffs };
+  });
+}
+
+export const EMPTY_LAYOUT = {
+  planet: [-650, -160, -560],
+  site: [520, 0, -260],
+  arrival: [-950, 0, 900],
+};
+
+function emptyEnv(e) {
+  const s = e.sys;
+  return {
+    bg: s.bg, neb1: s.neb1, neb2: s.neb2,
+    starPos: [-3000, 500, -2200],
+    starCol: s.star,
+    ambUp: s.ambUp, ambDown: s.ambDown,
+    fog: col.mul(s.neb1, 0.5),
+    fogDen: e.stellar === 'debris' ? 0.00012 : 0.00006,
+    skySeed: (e.seed % 997) / 997,
+    nebAmt: 0.9,
+  };
+}
+
+export function buildEmptyWorld(game, sd) {
+  const R = game.R;
+  const e = sd.empty;
+  const st = game.sysState(sd.id);
+  const env = emptyEnv(e);
+  const sm = starMesh(R);
+  const bodies = [];
+  if (e.stellar === 'binary') {
+    bodies.push({ type: 'star', mesh: sm, pos: env.starPos, size: 180, col: e.sys.star, orbit: { c: env.starPos, r: 360, speed: 0.03, phase: 0 } });
+    bodies.push({ type: 'star', mesh: sm, pos: env.starPos, size: 110, col: e.sys.star2, orbit: { c: env.starPos, r: 360, speed: 0.03, phase: Math.PI } });
+  } else bodies.push({ type: 'star', mesh: sm, pos: env.starPos, size: e.stellar === 'remnant' ? 60 : 160, col: e.sys.star, pulsar: e.stellar === 'remnant' });
+  const ps = e.planet === 'gas' ? 340 : 190;
+  bodies.push({ type: 'planet', mesh: cached('eplanet' + e.seed, () => planetMesh(R, e.planet, e.seed, { a: e.sys.gasA, b: e.sys.gasB, glow: e.sys.glow }, 4)), pos: EMPTY_LAYOUT.planet, size: ps, spin: 0.01, atmo: e.sys.glow });
+  if (e.planet === 'gas') bodies.push({ type: 'mesh', mesh: ringMesh(R, 'ering' + e.seed, ps * 1.4, ps * 2.2, e.sys.gasB, e.seed), pos: EMPTY_LAYOUT.planet, size: 1, spin: 0.004, tilt: 0.3 });
+  bodies.push({ type: 'mesh', mesh: cached('efield' + e.seed, () => asteroidField(R, e.seed + 3, e.kind === 'derelict' ? 380 : 160, 2600, 90, 900)), pos: [0, 0, 0], size: 1, spin: 0.002 });
+  const hazards = e.stellar === 'remnant' ? [{ type: 'pulsar', pos: env.starPos }] : [];
+  const world = new World(game, { env, bodies, hazards, kind: 'empty', storms: prepStorms(e.storms) });
+  world.kind = 'empty';
+  world.sysId = sd.id;
+  world.name = `${e.texts.name} — uncharted`;
+  world.arrival = EMPTY_LAYOUT.arrival;
+  const pal = { hull: [0.55, 0.55, 0.6], dark: [0.25, 0.25, 0.3], glow: e.sys.glow, accent: [0.6, 0.5, 0.4] };
+  const site = EMPTY_LAYOUT.site;
+  if (e.kind === 'derelict') {
+    for (let i = 0; i < 4; i++) {
+      const a = i * 1.7;
+      const w = makeLandmark(R, 'wreck', pal, 40 + i, [site[0] + Math.cos(a) * 420, 10 + i * 8, site[2] + Math.sin(a) * 420], 'Warship hulk');
+      w.selectable = true;
+      w.scan = { need: 9, progress: 0, done: !!st.done['w' + i], label: 'Salvage hulk', key: 'salvage', idx: i };
+      if (w.scan.done) w.name = 'Stripped hulk';
+      world.add(w);
+    }
+    const hulk = makeLandmark(R, 'wreck', { glow: [0.4, 0.9, 1] }, 77, site, 'Dormant frigate');
+    hulk.scale = 1.8;
+    hulk.radius *= 1.8;
+    hulk.selectable = true;
+    hulk.scan = { need: 18, progress: 0, done: !!st.done.hulk, label: 'Restore dormant frigate', key: 'hulk' };
+    if (!st.done.hulk) world.add(hulk);
+  } else if (e.kind === 'leviathan') {
+    const lp = { hull: [0.45, 0.55, 0.7], dark: [0.2, 0.25, 0.35], glow: [0.6, 0.95, 1.0], accent: [0.7, 0.5, 0.8] };
+    for (let i = 0; i < 3; i++) {
+      const l = makeShip(R, { style: 'colonial', role: 'keystone', pal: lp, vseed: 600 + i, team: 'neutral', pos: [site[0] + i * 300, 40 + i * 30, site[2] - i * 200], loadout: [], cls: 'Star leviathan' });
+      l.scale = 3.2;
+      l.radius *= 3.2;
+      l.baseSpeed = 9;
+      l.invulnerable = true;
+      l.weapons = [];
+      l.selectable = true;
+      l.name = ['Elder leviathan', 'Leviathan cow', 'Leviathan calf'][i];
+      l.order = { type: 'patrol', c: [0, 40, 0], r: 900 + i * 120, a: i * 2 };
+      l.scan = { need: 11, progress: 0, done: !!st.done['l' + i], label: 'Study leviathan', key: 'leviathan', idx: i };
+      world.add(l);
+    }
+  } else if (e.kind === 'anomaly') {
+    const lm = makeLandmark(R, 'spire', pal, e.seed, site, 'The Bent Spire');
+    lm.selectable = true;
+    lm.scan = { need: 45, progress: 0, done: !!st.done.anomaly, label: 'Extract research', key: 'anomaly' };
+    world.add(lm);
+    world.landmark = lm;
+  } else if (e.kind === 'relay') {
+    const lm = makeLandmark(R, 'gate', { ...pal, glow: game.relayActive ? [0.5, 1, 0.7] : [0.4, 0.45, 0.6] }, e.seed, site, 'Ancient relay');
+    lm.selectable = true;
+    lm.scan = { need: 20, progress: 0, done: !!game.relayActive, label: 'Activate relay', key: 'relay' };
+    world.add(lm);
+    world.landmark = lm;
+    if (!st.done.garrison) {
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2;
+        const rr = makeShip(R, { ...raiderOpts(i === 0), team: 'raider', pos: [site[0] + Math.cos(a) * 300, 20, site[2] + Math.sin(a) * 300] });
+        rr.home = [...site];
+        rr.garrison = true;
+        rr.name = `Scavenger ${rr.cls}`;
+        world.add(rr);
+      }
+    }
+  }
+  return world;
 }

@@ -2,7 +2,7 @@
 // Nothing here is a dice roll: outcomes follow from preparation, intel and what happens in battle.
 import { v3, TAU } from './math.js';
 import { TRAITS, TIERS, FACTIONS } from './data.js';
-import { makeShip, makeNode, civShipOpts, raiderOpts } from './entities.js';
+import { makeShip, makeNode, civShipOpts, raiderOpts, subOff } from './entities.js';
 import { CIV_LAYOUT } from './systems.js';
 
 export function initCivState(civ) {
@@ -24,6 +24,7 @@ export function initCivState(civ) {
     integrationFailed: 0,
     missionActive: null,
     brokenKeystone: null,
+    concessions: {},
   };
 }
 
@@ -66,11 +67,58 @@ export function evaluate(game, civ, pid) {
     if (pid === 'passage' || pid === 'trade') add('Fear your guns at their capital', 25, true);
     else add('Will not ally under threat', -15, true);
   }
+  if (s.concessions && s.concessions[pid]) add('Terms you met', s.concessions[pid], true);
+  if (s.coalition) add('Fear your expansion', -10, !!s.intel.priorities);
   if (s.treaties.passage && pid !== 'passage') add('Existing safe-passage treaty', 5, true);
   if (s.treaties.trade && pid !== 'trade') add('Existing trade ties', 5, true);
   const score = f.reduce((a, b) => a + b.v, 0);
   const missing = (P.requires || []).filter((r) => !s.treaties[r]);
   return { score, threshold: P.threshold, factors: f, missing };
+}
+
+// What the player can see before proposing: known factors give a centre, each
+// undiscovered consideration widens the range. Better intelligence narrows it.
+export function outlook(game, civ, pid) {
+  const ev = evaluate(game, civ, pid);
+  const known = ev.factors.filter((f) => f.known).reduce((a, f) => a + f.v, 0);
+  const hidden = ev.factors.filter((f) => !f.known).length;
+  const lo = known - hidden * 15, hi = known + hidden * 15;
+  let text, cls;
+  if (ev.missing.length) (text = 'Requires ' + ev.missing.map((m) => PROPOSALS[m].name).join(', ')), (cls = 'no');
+  else if (lo >= ev.threshold) (text = 'Will accept'), (cls = 'ok');
+  else if (hi < ev.threshold) (text = 'Will refuse'), (cls = 'no');
+  else if (known >= ev.threshold) (text = 'Likely'), (cls = 'ok');
+  else (text = 'Uncertain'), (cls = 'mid');
+  return { text, cls, known, hidden, threshold: ev.threshold };
+}
+
+// A refusal usually comes with terms, shaped by what the civilization actually values.
+export function counteroffer(game, civ, pid, ev) {
+  const d = ev.threshold - ev.score;
+  if (d <= 0 || ev.missing.length) return null;
+  const p = civ.priorities, s = civ.state;
+  if (s.threatActive) return { kind: 'withdraw', text: 'Withdraw your warships from our capital, then ask again.' };
+  if (p.security >= 2 && !s.helped && !s.missionActive) return { kind: 'mission', text: `Prove you can protect us: deal with the ${civ.neighbor} first.` };
+  if (d > 45) return { kind: 'refuse', text: 'No terms you could offer now would change our answer.' };
+  if (p.commerce >= p.knowledge || civ.scarcity) {
+    const cost = Math.ceil(d / 5) * 25;
+    return { kind: 'materials', cost, d, text: `Pay ${cost} materials as a show of good faith.` };
+  }
+  const cost = Math.ceil(d / 5) * 15;
+  return { kind: 'knowledge', cost, d, text: `Share ${cost} knowledge with our archives.` };
+}
+
+export function acceptCounter(game, civ, pid, c) {
+  if (c.kind === 'materials') {
+    if (game.materials < c.cost) return 'Not enough materials.';
+    game.materials -= c.cost;
+  } else if (c.kind === 'knowledge') {
+    if (game.knowledge < c.cost) return 'Not enough knowledge.';
+    game.knowledge -= c.cost;
+  } else return 'Those terms cannot be met with a payment.';
+  civ.state.concessions[pid] = (civ.state.concessions[pid] || 0) + c.d;
+  game.log(`Terms met for ${PROPOSALS[pid].name}.`, 'good');
+  return null;
 }
 
 export function propose(game, civ, pid) {
@@ -85,7 +133,8 @@ export function propose(game, civ, pid) {
   const same = prev && prev.key === key;
   s.answers[pid] = { key, ok };
   if (ok) applyTreaty(game, civ, pid);
-  return { ok, ev, same };
+  const counter = ok ? null : counteroffer(game, civ, pid, ev);
+  return { ok, ev, same, counter };
 }
 
 function applyTreaty(game, civ, pid) {
@@ -104,10 +153,8 @@ function applyTreaty(game, civ, pid) {
     s.status = 'allied';
     game.banner(`${civ.name} — Allied`, 'The system is marked allied. Their specialist vessel joins your fleet.');
     const w = game.world;
-    const spec = makeShip(game.R, { ...civShipOpts(civ, 'warden', 9), team: 'player', pos: v3.add(CIV_LAYOUT.station, [0, 30, 260]) });
+    const spec = makeShip(game.R, { ...civShipOpts(civ, 'warden', 9), team: 'player', pos: v3.add(CIV_LAYOUT.station, [0, 30, 260]), alliedFrom: civ.id, hullMul: 1.3, slots: 1 });
     spec.name = `${civ.species} Specialist`;
-    spec.alliedFrom = civ.id;
-    spec.hullMul = 1.3;
     w.add(spec);
     game.onOutcome(civ, 'allied');
   } else if (pid === 'protectorate') {
@@ -231,8 +278,9 @@ export function conquestScript(game, civ) {
         const defenders = w.entities.filter((e) => e.team === 'civ' && e.kind === 'ship' && e.weapons.length && v3.dist(e.pos, st.pos) < 700).length;
         if (near && !defenders) {
           captureT += dt;
-          game.setProgress('Forcing surrender', captureT / 12);
-          if (captureT >= 12) {
+          const need = subOff(st, 'command') ? 6 : 12;
+          game.setProgress(subOff(st, 'command') ? 'Forcing surrender — their command is broken' : 'Forcing surrender', captureT / need);
+          if (captureT >= need) {
             game.setProgress(null);
             resolve(game, civ, 'conquered');
           }
@@ -256,8 +304,8 @@ export function conquestScript(game, civ) {
   };
 }
 
-export function keystoneDeath(game, civ, e) {
-  if (!e.keystone || e.team === 'player') return;
+export function keystoneDeath(game, civ, e, force) {
+  if (!e.keystone || (e.team === 'player' && !force)) return;
   const w = game.world;
   const s = civ.state;
   s.brokenKeystone = e.keystone;
@@ -386,7 +434,15 @@ export function beginIntegration(game, civ) {
         s.trust -= 15;
         game.integrationUsed--;
         game.setProgress(null);
-        game.banner('Integration failed', 'The site was destroyed. They will not forget the attempt.');
+        game.banner('Integration failed', 'The site was destroyed — and the incident split their society. Breakaway forces now strike at everyone.');
+        // Failure has a concrete consequence: a breakaway faction hostile to all sides.
+        for (let i = 0; i < 3; i++) {
+          const b = makeShip(game.R, { ...civShipOpts(civ, 'warden', 40 + i), team: 'raider', pos: v3.add(e.pos, [(i - 1) * 80, 20, 120]) });
+          b.name = `Breakaway ${b.cls}`;
+          b.tint = [1, 0.6, 0.55];
+          b.home = [...e.pos];
+          w.add(b);
+        }
         w.script = conquest;
       } else conquest.onKill(e);
     },

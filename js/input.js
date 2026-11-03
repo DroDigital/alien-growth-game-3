@@ -108,6 +108,12 @@ export class Input {
       g.cycleScale();
     } else if (k === '1' || k === '2' || k === '3') g.setSpeed(+k);
     else if (k === '`') g.toggleDebug();
+    else if (k === 'j') g.ability(0);
+    else if (k === 'k') g.ability(1);
+    else if (k === 'y') g.ui.openResearch();
+    else if (k === 'm') g.toggleMute();
+    else if (k === 'p') g.holdSelection();
+    else if (k === 'u') g.withdrawSelection();
   }
 
   update(dt) {

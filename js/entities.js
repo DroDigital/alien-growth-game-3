@@ -70,9 +70,40 @@ export function applyStats(e) {
       e.droneCount = Math.round((e.role === 'flagship' ? 4 : 2) * m);
     }
   }
+  // Crew veterancy (the Ascendancy's specialty): +8% damage per rank.
+  e.rank = rankOf(e.xp || 0);
+  e.dmgMul = 1 + (e.style === 'ascendancy' ? 0.08 * e.rank : 0);
+  e.shieldRegen *= 1 + (e.style === 'ascendancy' ? 0.1 * e.rank : 0);
   e.hull = e.maxHull * hr;
   e.shield = e.maxShield * sr;
+  initSubs(e);
 }
+
+export const RANKS = [0, 4, 10, 20];
+export function rankOf(xp) {
+  let r = 0;
+  for (let i = 0; i < RANKS.length; i++) if (xp >= RANKS[i]) r = i;
+  return r;
+}
+
+const SUB_ROLES = ['flagship', 'keystone', 'escort', 'warden', 'raiderBig', 'repair', 'convoy'];
+// Capital ships and stations expose engines, weapons, shields and command.
+export function initSubs(e) {
+  const isStation = e.kind === 'station';
+  if (!isStation && !SUB_ROLES.includes(e.role)) {
+    e.subs = null;
+    return;
+  }
+  const keys = isStation ? ['weapons', 'shields', 'command'] : ['engines', 'weapons', 'shields', 'command'];
+  const old = e.subs || {};
+  e.subs = {};
+  for (const k of keys) {
+    const max = e.maxHull * (isStation ? 0.18 : 0.3);
+    const ratio = old[k] ? old[k].hp / old[k].max : 1;
+    e.subs[k] = { hp: max * ratio, max };
+  }
+}
+export const subOff = (e, k) => !!(e.subs && e.subs[k] && e.subs[k].hp <= 0);
 
 export function refreshVisual(R, e) {
   e.visual = getVisual(R, { style: e.style, role: e.role, seed: e.vseed, pal: e.pal, traits: (e.traits || []).map((t) => ({ ...t, color: TRAITS[t.id].color })) });
@@ -94,6 +125,10 @@ export function makeShip(R, opt) {
   e.keystone = opt.keystone || null;
   e.ally = opt.ally || false;
   e.hybrid = opt.hybrid || false;
+  e.captured = opt.captured || false;
+  e.alliedFrom = opt.alliedFrom || null;
+  e.xp = opt.xp || 0;
+  e.tint = opt.tint || null;
   e.yaw = opt.yaw || 0;
   e.selectable = opt.team === 'player';
   const fac = FACTIONS[e.style];
@@ -142,6 +177,7 @@ export function makeHomeStation(R, faction, pos) {
   e.selectable = true;
   e.immobile = true;
   e.repairAura = 260;
+  initSubs(e);
   return e;
 }
 
@@ -162,6 +198,7 @@ export function makeCivStation(R, civ, pos) {
   e.weapons = weaponsFrom(['stationgun', 'stationgun', 'stationgun']);
   e.weapons.forEach((w) => (w.color = civ.pal.glow));
   e.immobile = true;
+  initSubs(e);
   return e;
 }
 

@@ -9,7 +9,7 @@ export const FACTIONS = {
     production: 'grows',
     productionVerb: 'Gestating',
     assimilateVerb: 'Seed a symbiotic reef',
-    names: { flagship: 'Mother Leviathan', escort: 'Thornback', scout: 'Drifter', repair: 'Mender', fighter: 'Spore-drone' },
+    names: { flagship: 'Mother Leviathan', escort: 'Thornback', scout: 'Drifter', repair: 'Mender', boarder: 'Latcher', fighter: 'Spore-drone' },
     home: {
       name: 'Nursery of Thessaly Deep',
       star: [1.0, 0.82, 0.62], starSize: 70,
@@ -28,7 +28,7 @@ export const FACTIONS = {
     production: 'assembles',
     productionVerb: 'Assembling',
     assimilateVerb: 'Establish a network uplink',
-    names: { flagship: 'Lattice Prime', escort: 'Node Cluster', scout: 'Prism', repair: 'Fabricator', fighter: 'Drone' },
+    names: { flagship: 'Lattice Prime', escort: 'Node Cluster', scout: 'Prism', repair: 'Fabricator', boarder: 'Intruder', fighter: 'Drone' },
     home: {
       name: 'Foundry of Pale Kethe',
       star: [0.92, 0.95, 1.0], starSize: 60,
@@ -47,7 +47,7 @@ export const FACTIONS = {
     production: 'launches',
     productionVerb: 'Launching',
     assimilateVerb: 'Install an integration compact',
-    names: { flagship: 'Carrier Vigil', escort: 'Lancer Frigate', scout: 'Herald', repair: 'Tender', fighter: 'Strike Fighter' },
+    names: { flagship: 'Carrier Vigil', escort: 'Lancer Frigate', scout: 'Herald', repair: 'Tender', boarder: 'Assault Tender', fighter: 'Strike Fighter' },
     home: {
       name: 'Throne of Auren',
       star: [1.0, 0.95, 0.82], starSize: 65,
@@ -88,6 +88,7 @@ export const ROLE_STATS = {
   escort: { hull: 540, shield: 250, regen: 8, armor: 2, speed: 31, turn: 1.4, scan: 1 },
   scout: { hull: 230, shield: 140, regen: 6, armor: 0, speed: 53, turn: 2.4, scan: 3 },
   repair: { hull: 460, shield: 220, regen: 7, armor: 1, speed: 25, turn: 1.0, scan: 1, repair: 22 },
+  boarder: { hull: 380, shield: 160, regen: 6, armor: 1, speed: 46, turn: 1.8, scan: 1 },
   fighter: { hull: 30, shield: 0, regen: 0, armor: 0, speed: 81, turn: 4.0, scan: 0 },
   warden: { hull: 420, shield: 200, regen: 7, armor: 2, speed: 28, turn: 1.3, scan: 1 },
   keystone: { hull: 1300, shield: 500, regen: 10, armor: 3, speed: 14, turn: 0.6, scan: 1 },
@@ -97,9 +98,9 @@ export const ROLE_STATS = {
 };
 
 export const FACTION_LOADOUT = {
-  bloom: { flagship: ['spore', 'bioplasma', 'bioplasma'], escort: ['thorn', 'thorn'], scout: ['sting'], repair: [], fighter: ['fighterGun'] },
-  array: { flagship: ['cohbeam', 'cohbeam'], escort: ['dronebeam', 'dronebeam'], scout: ['prismbeam'], repair: ['prismbeam'], fighter: ['fighterGun'] },
-  ascendancy: { flagship: ['battery', 'battery', 'pd'], escort: ['lance', 'pd'], scout: ['heraldgun'], repair: ['pd'], fighter: ['fighterGun'] },
+  bloom: { flagship: ['spore', 'bioplasma', 'bioplasma'], escort: ['thorn', 'thorn'], scout: ['sting'], repair: [], boarder: ['thorn'], fighter: ['fighterGun'] },
+  array: { flagship: ['cohbeam', 'cohbeam'], escort: ['dronebeam', 'dronebeam'], scout: ['prismbeam'], repair: ['prismbeam'], boarder: ['dronebeam'], fighter: ['fighterGun'] },
+  ascendancy: { flagship: ['battery', 'battery', 'pd'], escort: ['lance', 'pd'], scout: ['heraldgun'], repair: ['pd'], boarder: ['pd'], fighter: ['fighterGun'] },
 };
 
 export const FACTION_MODS = {
@@ -108,9 +109,9 @@ export const FACTION_MODS = {
   ascendancy: { hull: 1.0, shield: 1.3, regenHull: 0, regenHullIdle: 0.006, carrier: true },
 };
 
-export const SHIP_COST = { escort: 160, scout: 80, repair: 140, flagship: 450 };
-export const BUILD_TIME = { escort: 16, scout: 9, repair: 14, flagship: 40 };
-export const ADAPT_SLOTS = { flagship: 2, escort: 1, scout: 1, repair: 1 };
+export const SHIP_COST = { escort: 160, scout: 80, repair: 140, boarder: 150, flagship: 450 };
+export const BUILD_TIME = { escort: 16, scout: 9, repair: 14, boarder: 14, flagship: 40 };
+export const ADAPT_SLOTS = { flagship: 2, escort: 1, scout: 1, repair: 1, boarder: 1, warden: 1, keystone: 2 };
 
 // Signature capabilities that can be inherited. Each faction expresses them differently.
 export const TRAITS = {
@@ -175,4 +176,50 @@ export const OBJECTIVES = {
   strike: { name: 'Strike', desc: 'Weapon damage +12% for this expedition.' },
   envoy: { name: 'Envoy', desc: 'Start with +10 trust from any civilization you meet.' },
   integrate: { name: 'Integration', desc: 'Integration speed +30% for this expedition.' },
+};
+
+// Faction weaknesses, stated plainly so players can plan around them.
+export const WEAKNESS = {
+  bloom: 'Regeneration and growth draw on biological reserves. When reserves run dry, ships stop healing.',
+  array: 'Network bonuses need a live command link to the flagship. Isolated or decapitated formations fight worse.',
+  ascendancy: 'Crews gain veterancy from kills. Veterans hit harder — and losing them costs more than the hull.',
+};
+
+// Active abilities, centred on the flagship. Cooldowns in seconds of simulation time.
+export const ABILITIES = {
+  bloom: [
+    { id: 'surge', name: 'Regenerative surge', key: 'J', cd: 30, cost: { reserves: 35 }, desc: 'Ships near the flagship knit 30% of their hull back over six seconds.' },
+    { id: 'sporebloom', name: 'Spore bloom', key: 'K', cd: 24, cost: { reserves: 15 }, desc: 'Releases a boarding-spore cloud that infests every enemy near the flagship.' },
+  ],
+  array: [
+    { id: 'overclock', name: 'Overclock network', key: 'J', cd: 30, cost: { energy: 15 }, desc: 'Fleet fire rate +45% for eight seconds. Needs the flagship command link.' },
+    { id: 'intrusion', name: 'Electronic intrusion', key: 'K', cd: 22, cost: { energy: 10 }, desc: "Shuts down the focused enemy's weapons (longer against machines)." },
+  ],
+  ascendancy: [
+    { id: 'brace', name: 'Brace shields', key: 'J', cd: 30, cost: { energy: 12 }, desc: 'Fleet shields surge by half and incoming damage drops 30% for six seconds.' },
+    { id: 'scramble', name: 'Scramble wing', key: 'K', cd: 35, cost: { energy: 12 }, desc: 'The carrier launches an extra strike wing immediately.' },
+  ],
+};
+
+export const RESEARCH = {
+  boarding: { name: 'Boarding doctrine', cost: 60, desc: 'Unlocks boarding craft. They capture ships whose engines are disabled.' },
+  capacity: { name: 'Integration lattice', cost: 120, desc: '+1 integration capacity.' },
+  slots: { name: 'Adaptive frames', cost: 140, desc: '+1 adaptation slot on every ship.' },
+  jumpkit: { name: 'Jump support array', cost: 90, desc: 'Jumps cost 40% less energy.' },
+  deepscan: { name: 'Long-range scanners', cost: 70, desc: 'Reveals the signatures of every system in the cluster.' },
+  subsys: { name: 'Fire-control analysis', cost: 80, desc: 'Subsystem focus fire deals 40% more subsystem damage.' },
+};
+
+export const SYSTEM_ROLES = {
+  industry: { name: 'Industry', desc: '+1.2 materials/s' },
+  research: { name: 'Research', desc: '+0.25 knowledge/s' },
+  trade: { name: 'Trade', desc: '+0.5 energy/s' },
+  defense: { name: 'Defence', desc: 'Raids here are repelled automatically' },
+};
+
+export const SUBSYSTEMS = {
+  engines: { name: 'Engines', effect: 'Adrift — vulnerable to boarding' },
+  weapons: { name: 'Weapons', effect: 'Guns silent' },
+  shields: { name: 'Shields', effect: 'Shields collapsed' },
+  command: { name: 'Command', effect: 'Coordination broken' },
 };

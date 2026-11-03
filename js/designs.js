@@ -18,7 +18,10 @@ export function getVisual(R, spec) {
   const key = `${spec.style}|${spec.role}|${spec.seed || 0}|${traitKey}|${spec.pal ? JSON.stringify(spec.pal) : ''}`;
   if (cache.has(key)) return cache.get(key);
   const fn = BUILDERS[spec.style];
-  const v = fn(R, spec.role, spec.pal || PAL[spec.style], spec.seed || 1);
+  const pal = spec.pal || PAL[spec.style];
+  const boarder = spec.role === 'boarder';
+  const v = fn(R, boarder ? 'scout' : spec.role, pal, (spec.seed || 1) + (boarder ? 17 : 0));
+  if (boarder) addBoardingClaws(R, spec.style, pal, v);
   for (const t of spec.traits || []) addTraitVisual(R, spec.style, t, v);
   cache.set(key, v);
   return v;
@@ -796,4 +799,23 @@ export function integrationNode(R, faction, seed) {
     parts.push(P(b.build(R)));
   }
   return { parts, radius: 32, engines: [], glowCol: pal.engine };
+}
+
+// Boarding craft: a fast chassis with forward grapples in the faction's own material.
+function addBoardingClaws(R, style, pal, v) {
+  const L = v.radius;
+  const c = style === 'bloom' ? pal.flesh : style === 'array' ? pal.accent : pal.gold || pal.accent || [0.8, 0.7, 0.4];
+  const g = style === 'bloom' ? pal.vein : style === 'array' ? pal.light : pal.hangar || pal.glow || [1, 0.8, 0.5];
+  const b = new MB(91, 0.08);
+  for (const sx of [-1, 1]) {
+    const pts = [];
+    for (let k = 0; k <= 5; k++) {
+      const u = k / 5;
+      pts.push([sx * (L * 0.35 - u * L * 0.25), -u * L * 0.1, L * 0.2 + u * L * 0.9]);
+    }
+    b.tube(pts, L * 0.07, L * 0.02, 4, c, 0, (u) => (u > 0.8 ? [g, 1] : [c, 0]));
+  }
+  b.box(T([0, -L * 0.2, 0], 0, 0, 0, L * 0.5, L * 0.18, L * 0.7), c, 0);
+  v.parts.push(P(b.build(R), I(), style === 'bloom' ? { type: 'pulse', amp: 0.06, freq: 1.2 } : style === 'array' ? { type: 'slide', axis: 'z', amp: L * 0.06, freq: 2 } : null));
+  v.radius *= 1.1;
 }

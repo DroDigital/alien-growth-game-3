@@ -16,8 +16,15 @@ const MESH_FS = `#version 300 es
 precision highp float;
 in vec3 vWorld; in vec3 vCol; in float vEm;
 uniform vec3 uCam, uStarPos, uStarCol, uAmbUp, uAmbDown, uFogCol, uFlashCol;
-uniform float uEmBoost, uFlash, uUnlit, uAlpha, uFogDen;
+uniform float uEmBoost, uFlash, uUnlit, uAlpha, uFogDen, uDither;
 out vec4 frag;
+const float BAYER[16] = float[16](0.,8.,2.,10.,12.,4.,14.,6.,3.,11.,1.,9.,15.,7.,13.,5.);
+vec3 dither(vec3 c, float on){
+  if (on < 0.5) return c;
+  ivec2 p = ivec2(gl_FragCoord.xy) % 4;
+  float b = BAYER[p.y * 4 + p.x] / 16.0;
+  return floor(c * 20.0 + b) / 20.0;
+}
 void main(){
   // Flat (faceted) normal from screen derivatives -> the sculpted low-poly look.
   vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
@@ -40,7 +47,7 @@ void main(){
   float fog = 1.0 - exp(-uFogDen * d);
   c = mix(c, uFogCol, fog * 0.55);
   c = vec3(1.0) - exp(-c * 1.25); // soft filmic roll-off
-  frag = vec4(c, uAlpha);
+  frag = vec4(dither(c, uDither), uAlpha);
 }`;
 
 const SKY_VS = `#version 300 es
@@ -53,9 +60,16 @@ precision highp float;
 in vec2 vNdc;
 uniform mat4 uInvVP; uniform vec3 uCam;
 uniform vec3 uBg, uNeb1, uNeb2, uStarDir, uStarCol;
-uniform float uSeed, uNebAmt;
+uniform float uSeed, uNebAmt, uDither;
 uniform int uOct;
 out vec4 frag;
+const float BAYER[16] = float[16](0.,8.,2.,10.,12.,4.,14.,6.,3.,11.,1.,9.,15.,7.,13.,5.);
+vec3 dither(vec3 c, float on){
+  if (on < 0.5) return c;
+  ivec2 p = ivec2(gl_FragCoord.xy) % 4;
+  float b = BAYER[p.y * 4 + p.x] / 16.0;
+  return floor(c * 20.0 + b) / 20.0;
+}
 float h3(vec3 p){ p = fract(p * 0.3183099 + vec3(0.11, 0.17, 0.13) + uSeed); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
 float vn(vec3 x){
   vec3 i = floor(x); vec3 f = fract(x); f = f*f*(3.0-2.0*f);
@@ -83,7 +97,7 @@ void main(){
   c += vec3(s) * mix(vec3(0.8,0.85,1.0), vec3(1.0,0.85,0.7), h3(floor(d*180.0)));
   float sd = max(dot(d, uStarDir), 0.0);
   c += uStarCol * (pow(sd, 60.0) * 0.6 + pow(sd, 6.0) * 0.12);
-  frag = vec4(c, 1.0);
+  frag = vec4(dither(c, uDither), 1.0);
 }`;
 
 const FX_VS = `#version 300 es
@@ -266,6 +280,7 @@ export class Renderer {
     gl.uniform1f(u.uSeed, env.skySeed || 0);
     gl.uniform1f(u.uNebAmt, env.nebAmt ?? 1);
     gl.uniform1i(u.uOct, this.quality === 'low' ? 3 : 5);
+    gl.uniform1f(u.uDither, this.dither ? 1 : 0);
     gl.bindVertexArray(this.skyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -284,6 +299,7 @@ export class Renderer {
     gl.uniform3fv(mu.uFogCol, env.fog);
     gl.uniform1f(mu.uFogDen, env.fogDen ?? 0.00012);
     gl.uniform3fv(mu.uFlashCol, [1, 0.92, 0.8]);
+    gl.uniform1f(mu.uDither, this.dither ? 1 : 0);
     this._mu = mu;
     this.fxCount = 0;
   }
